@@ -91,3 +91,40 @@ def trigger() -> tuple[Any, int]:
     except Exception as e:
         logger.error("触发监控流程时发生未处理异常: %s", e)
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/summary", methods=["GET"])
+def summary() -> tuple[Any, int]:
+    """Trigger the daily summary report generation and push.
+
+    Returns:
+        Tuple of (JSON response, HTTP status code).
+    """
+    try:
+        config = load_config()
+
+        from src.daily_summary import DailySummaryReporter
+        from src.formatter import format_daily_summary_plain, format_daily_summary_telegram
+        from src.notifier import TelegramNotifier
+        from src.premium_store import PremiumStore
+
+        premium_store = PremiumStore(data_dir=config.data_dir)
+        reporter = DailySummaryReporter(config=config, premium_store=premium_store)
+        report = reporter.generate()
+
+        # Push via Telegram
+        if config.telegram.enabled:
+            notifier = TelegramNotifier(config.telegram)
+            message = format_daily_summary_telegram(report)
+            notifier.send(message)
+
+        plain = format_daily_summary_plain(report)
+        return jsonify({"status": "success", "summary": plain}), 200
+
+    except SystemExit:
+        logger.error("配置加载失败")
+        return jsonify({"status": "error", "message": "配置加载失败"}), 500
+
+    except Exception as e:
+        logger.error("生成每日摘要时发生异常: %s", e)
+        return jsonify({"status": "error", "message": str(e)}), 500

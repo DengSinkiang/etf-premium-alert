@@ -103,6 +103,9 @@ def load_config(path: str = "config.yaml") -> AppConfig:
                 target_amount=float(etf_raw["target_amount"]),
                 bought_amount=float(etf_raw.get("bought_amount", 0.0)),
                 premium_rules=premium_rules,
+                sell_threshold=float(etf_raw.get("sell_threshold", 8.0)),
+                group=etf_raw.get("group", None) or None,
+                discount_threshold=float(etf_raw.get("discount_threshold", 1.0)),
             )
         )
 
@@ -123,4 +126,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
         etfs=etfs,
         telegram=telegram,
         alert_threshold=alert_threshold,
+        lookback_days=int(raw.get("lookback_days", 7)),
+        data_dir=str(raw.get("data_dir", "data")),
+        summary_time=str(raw.get("summary_time", "15:30")),
     )

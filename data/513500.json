@@ -1,0 +1,36 @@
+{
+  "records": [
+    {
+      "premium_rate": 3.45,
+      "timestamp": "2026-06-03T15:07:56"
+    },
+    {
+      "premium_rate": 6.9,
+      "timestamp": "2026-06-03T16:56:39"
+    },
+    {
+      "premium_rate": 5.97,
+      "timestamp": "2026-06-03T17:04:27"
+    },
+    {
+      "premium_rate": 5.97,
+      "timestamp": "2026-06-03T17:07:28"
+    },
+    {
+      "premium_rate": 5.97,
+      "timestamp": "2026-06-03T17:51:31"
+    },
+    {
+      "premium_rate": 6.9,
+      "timestamp": "2026-06-03T17:54:06"
+    },
+    {
+      "premium_rate": 5.97,
+      "timestamp": "2026-06-03T17:54:36"
+    },
+    {
+      "premium_rate": 6.9,
+      "timestamp": "2026-06-03T17:58:49"
+    }
+  ]
+}

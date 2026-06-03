@@ -70,7 +70,7 @@ class TestMonitorRun:
 
         # Mock the data source manager
         mock_dsm = MagicMock()
-        mock_dsm.get_etf_data.return_value = _make_etf_data()
+        mock_dsm.get_etf_data.return_value = (_make_etf_data(), None)
         monitor._data_source_manager = mock_dsm
 
         results = monitor.run()
@@ -97,7 +97,7 @@ class TestMonitorRun:
         monitor = Monitor(config)
 
         mock_dsm = MagicMock()
-        mock_dsm.get_etf_data.return_value = None
+        mock_dsm.get_etf_data.return_value = (None, "所有数据源获取 513500 均失败")
         monitor._data_source_manager = mock_dsm
 
         results = monitor.run()
@@ -141,8 +141,8 @@ class TestMonitorRun:
         mock_dsm = MagicMock()
         # First ETF fails, second succeeds
         mock_dsm.get_etf_data.side_effect = [
-            None,
-            _make_etf_data(code="159501"),
+            (None, "所有数据源获取 513500 均失败"),
+            (_make_etf_data(code="159501"), None),
         ]
         monitor._data_source_manager = mock_dsm
 
@@ -164,13 +164,13 @@ class TestMonitorRun:
 
         # Return data with iopv=0 which will cause calculation error
         mock_dsm = MagicMock()
-        mock_dsm.get_etf_data.return_value = ETFData(
+        mock_dsm.get_etf_data.return_value = (ETFData(
             code="513500",
             price=1.5,
             iopv=0.0,
             update_time=datetime(2024, 1, 15, 9, 30, 0),
             source="AKShare",
-        )
+        ), None)
         monitor._data_source_manager = mock_dsm
 
         results = monitor.run()
@@ -192,7 +192,7 @@ class TestMonitorRun:
         monitor = Monitor(config)
 
         mock_dsm = MagicMock()
-        mock_dsm.get_etf_data.return_value = _make_etf_data()
+        mock_dsm.get_etf_data.return_value = (_make_etf_data(), None)
         monitor._data_source_manager = mock_dsm
 
         mock_notifier = MagicMock()
@@ -215,7 +215,7 @@ class TestMonitorRun:
         monitor = Monitor(config)
 
         mock_dsm = MagicMock()
-        mock_dsm.get_etf_data.return_value = _make_etf_data()
+        mock_dsm.get_etf_data.return_value = (_make_etf_data(), None)
         monitor._data_source_manager = mock_dsm
 
         mock_notifier = MagicMock()
@@ -234,7 +234,7 @@ class TestMonitorRun:
         monitor = Monitor(config)
 
         mock_dsm = MagicMock()
-        mock_dsm.get_etf_data.return_value = None
+        mock_dsm.get_etf_data.return_value = (None, "所有数据源获取 513500 均失败")
         monitor._data_source_manager = mock_dsm
 
         mock_notifier = MagicMock()
@@ -257,7 +257,7 @@ class TestMonitorRun:
         monitor = Monitor(config)
 
         mock_dsm = MagicMock()
-        mock_dsm.get_etf_data.return_value = _make_etf_data()
+        mock_dsm.get_etf_data.return_value = (_make_etf_data(), None)
         monitor._data_source_manager = mock_dsm
 
         results = monitor.run()
@@ -282,3 +282,242 @@ class TestMonitorRun:
 
         assert len(results) == 1
         assert results[0].error is not None
+
+
+class TestMonitorDiscountAlert:
+    """Tests for discount alert integration in Monitor (Task 4.4)."""
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_discount_alert_triggered_and_sent(self, mock_haoetf, mock_akshare, mock_dsm_cls, capsys):
+        """Test that discount alert is triggered and Telegram message sent when discount detected."""
+        config = _make_config(telegram_enabled=True)
+        monitor = Monitor(config)
+
+        # ETF with price below iopv (discount scenario)
+        # price=1.40, iopv=1.50 → premium_rate = (1.40-1.50)/1.50*100 = -6.67%
+        mock_dsm = MagicMock()
+        mock_dsm.get_etf_data.return_value = (ETFData(
+            code="513500",
+            price=1.40,
+            iopv=1.50,
+            update_time=datetime(2024, 1, 15, 9, 30, 0),
+            source="AKShare",
+        ), None)
+        monitor._data_source_manager = mock_dsm
+
+        mock_notifier = MagicMock()
+        mock_notifier.send.return_value = True
+        monitor._notifier = mock_notifier
+
+        results = monitor.run()
+
+        # Should have called send twice: once for discount alert, once for normal notification
+        assert mock_notifier.send.call_count == 2
+        # First call is the discount alert
+        discount_msg = mock_notifier.send.call_args_list[0][0][0]
+        assert "折价提醒" in discount_msg
+        assert "513500" in discount_msg
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_no_discount_alert_when_premium_positive(self, mock_haoetf, mock_akshare, mock_dsm_cls, capsys):
+        """Test no discount alert when premium rate is positive."""
+        config = _make_config(telegram_enabled=True)
+        monitor = Monitor(config)
+
+        # price > iopv → positive premium, no discount
+        mock_dsm = MagicMock()
+        mock_dsm.get_etf_data.return_value = (_make_etf_data(price=1.5, iopv=1.45), None)
+        monitor._data_source_manager = mock_dsm
+
+        mock_notifier = MagicMock()
+        mock_notifier.send.return_value = True
+        monitor._notifier = mock_notifier
+
+        results = monitor.run()
+
+        # Only one send call for regular notification, no discount alert
+        assert mock_notifier.send.call_count == 1
+        sent_msg = mock_notifier.send.call_args_list[0][0][0]
+        assert "折价提醒" not in sent_msg
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_discount_alert_not_sent_when_telegram_disabled(self, mock_haoetf, mock_akshare, mock_dsm_cls, capsys):
+        """Test that discount alert does not send when Telegram is disabled."""
+        config = _make_config(telegram_enabled=False)
+        monitor = Monitor(config)
+
+        # Discount scenario
+        mock_dsm = MagicMock()
+        mock_dsm.get_etf_data.return_value = (ETFData(
+            code="513500",
+            price=1.40,
+            iopv=1.50,
+            update_time=datetime(2024, 1, 15, 9, 30, 0),
+            source="AKShare",
+        ), None)
+        monitor._data_source_manager = mock_dsm
+
+        mock_notifier = MagicMock()
+        monitor._notifier = mock_notifier
+
+        results = monitor.run()
+
+        # No notification calls at all
+        mock_notifier.send.assert_not_called()
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_discount_alert_telegram_failure_does_not_interrupt(self, mock_haoetf, mock_akshare, mock_dsm_cls, capsys):
+        """Test that Telegram push failure for discount alert does not interrupt monitoring."""
+        config = _make_config(telegram_enabled=True)
+        monitor = Monitor(config)
+
+        # Discount scenario
+        mock_dsm = MagicMock()
+        mock_dsm.get_etf_data.return_value = (ETFData(
+            code="513500",
+            price=1.40,
+            iopv=1.50,
+            update_time=datetime(2024, 1, 15, 9, 30, 0),
+            source="AKShare",
+        ), None)
+        monitor._data_source_manager = mock_dsm
+
+        mock_notifier = MagicMock()
+        mock_notifier.send.return_value = False  # Simulate push failure
+        monitor._notifier = mock_notifier
+
+        # Should not raise
+        results = monitor.run()
+
+        assert len(results) == 1
+        assert results[0].error is None
+        assert results[0].premium_rate is not None
+
+
+class TestMonitorVolumeConditional:
+    """Tests for volume/turnover_rate conditional display in Monitor (Task 5.2)."""
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_volume_included_when_premium_above_threshold(self, mock_haoetf, mock_akshare, mock_dsm_cls, capsys):
+        """Test volume/turnover_rate attached when premium_rate >= alert_threshold."""
+        config = _make_config()  # alert_threshold=3.0
+        monitor = Monitor(config)
+
+        # price=1.55, iopv=1.45 → premium_rate = (1.55-1.45)/1.45*100 ≈ 6.90%
+        # This exceeds alert_threshold of 3.0
+        mock_dsm = MagicMock()
+        mock_dsm.get_etf_data.return_value = (ETFData(
+            code="513500",
+            price=1.55,
+            iopv=1.45,
+            update_time=datetime(2024, 1, 15, 9, 30, 0),
+            source="AKShare",
+            volume=5000000.0,
+            turnover_rate=2.35,
+        ), None)
+        monitor._data_source_manager = mock_dsm
+
+        results = monitor.run()
+
+        result = results[0]
+        assert result.premium_rate >= 3.0
+        assert result.volume == 5000000.0
+        assert result.turnover_rate == 2.35
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_volume_none_when_premium_below_threshold(self, mock_haoetf, mock_akshare, mock_dsm_cls, capsys):
+        """Test volume/turnover_rate are None when premium_rate < alert_threshold."""
+        config = _make_config()  # alert_threshold=3.0
+        monitor = Monitor(config)
+
+        # price=1.46, iopv=1.45 → premium_rate = (1.46-1.45)/1.45*100 ≈ 0.69%
+        # This is below alert_threshold of 3.0
+        mock_dsm = MagicMock()
+        mock_dsm.get_etf_data.return_value = (ETFData(
+            code="513500",
+            price=1.46,
+            iopv=1.45,
+            update_time=datetime(2024, 1, 15, 9, 30, 0),
+            source="AKShare",
+            volume=5000000.0,
+            turnover_rate=2.35,
+        ), None)
+        monitor._data_source_manager = mock_dsm
+
+        results = monitor.run()
+
+        result = results[0]
+        assert result.premium_rate < 3.0
+        assert result.volume is None
+        assert result.turnover_rate is None
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_volume_none_when_exactly_at_threshold(self, mock_haoetf, mock_akshare, mock_dsm_cls, capsys):
+        """Test volume/turnover_rate included when premium_rate exactly equals alert_threshold."""
+        # alert_threshold=3.0, we need premium_rate exactly 3.0
+        # premium_rate = (price - iopv) / iopv * 100 = 3.0
+        # price = iopv * 1.03 = 1.45 * 1.03 = 1.4935
+        config = _make_config()
+        monitor = Monitor(config)
+
+        mock_dsm = MagicMock()
+        mock_dsm.get_etf_data.return_value = (ETFData(
+            code="513500",
+            price=1.4935,
+            iopv=1.45,
+            update_time=datetime(2024, 1, 15, 9, 30, 0),
+            source="AKShare",
+            volume=3000000.0,
+            turnover_rate=1.5,
+        ), None)
+        monitor._data_source_manager = mock_dsm
+
+        results = monitor.run()
+
+        result = results[0]
+        assert result.premium_rate >= 3.0
+        assert result.volume == 3000000.0
+        assert result.turnover_rate == 1.5
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_volume_none_propagated_when_source_has_no_data(self, mock_haoetf, mock_akshare, mock_dsm_cls, capsys):
+        """Test that when source has None volume, result also has None even above threshold."""
+        config = _make_config()  # alert_threshold=3.0
+        monitor = Monitor(config)
+
+        # High premium but no volume data from source
+        mock_dsm = MagicMock()
+        mock_dsm.get_etf_data.return_value = (ETFData(
+            code="513500",
+            price=1.55,
+            iopv=1.45,
+            update_time=datetime(2024, 1, 15, 9, 30, 0),
+            source="AKShare",
+            volume=None,
+            turnover_rate=None,
+        ), None)
+        monitor._data_source_manager = mock_dsm
+
+        results = monitor.run()
+
+        result = results[0]
+        assert result.premium_rate >= 3.0
+        # Volume/turnover_rate from source is None, so result is None
+        assert result.volume is None
+        assert result.turnover_rate is None

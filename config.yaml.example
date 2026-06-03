@@ -1,8 +1,11 @@
+summary_time: "15:30"    # 摘要报告触发时间 HH:MM（北京时间），默认 15:30
+
 etfs:
   - code: "513500"
     name: "博时标普500ETF"
     target_amount: 100000
     bought_amount: 30000
+    discount_threshold: 1.0    # 折价触发阈值（%），范围 0.1-20.0，默认 1.0
     premium_rules:
       - max_premium: 1.0
         min_ratio: 0.6
@@ -18,6 +21,7 @@ etfs:
     name: "嘉实纳斯达克100ETF"
     target_amount: 80000
     bought_amount: 20000
+    discount_threshold: 1.0    # 折价触发阈值（%），范围 0.1-20.0，默认 1.0
     premium_rules:
       - max_premium: 1.0
         min_ratio: 0.6

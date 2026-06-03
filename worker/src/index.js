@@ -15,14 +15,22 @@ export default {
   async scheduled(event, env, ctx) {
     const apiUrl = env.API_URL || "https://etf-premium-alert.onrender.com";
 
+    // 判断是盘中监控还是收盘摘要
+    // UTC 7:30 = 北京 15:30，触发每日摘要
+    const hour = new Date(event.scheduledTime).getUTCHours();
+    const minute = new Date(event.scheduledTime).getUTCMinutes();
+    const isSummary = hour === 7 && minute === 30;
+
+    const endpoint = isSummary ? "/summary" : "/trigger";
+
     try {
-      const response = await fetch(`${apiUrl}/trigger`, {
+      const response = await fetch(`${apiUrl}${endpoint}`, {
         method: "GET",
         headers: { "User-Agent": "Cloudflare-Worker-ETF-Monitor" },
       });
 
       const data = await response.json();
-      console.log(`[${new Date().toISOString()}] 触发成功: status=${data.status}`);
+      console.log(`[${new Date().toISOString()}] ${endpoint} 触发成功: status=${data.status}`);
 
       if (data.results) {
         for (const r of data.results) {
@@ -34,7 +42,7 @@ export default {
         }
       }
     } catch (err) {
-      console.error(`[${new Date().toISOString()}] 触发失败: ${err.message}`);
+      console.error(`[${new Date().toISOString()}] ${endpoint} 触发失败: ${err.message}`);
     }
   },
 
