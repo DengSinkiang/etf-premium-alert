@@ -1,5 +1,6 @@
 """Configuration loader for the QDII ETF Premium Monitor."""
 
+import os
 import sys
 from typing import Any
 
@@ -10,7 +11,10 @@ from src.models import AppConfig, ETFConfig, PremiumRule, TelegramConfig
 
 
 def load_config(path: str = "config.yaml") -> AppConfig:
-    """加载并验证配置文件。
+    """加载并验证配置。
+
+    优先从环境变量 ETF_CONFIG_YAML 读取配置内容（适用于 Render 等云部署），
+    如果环境变量未设置，则从文件路径加载。
 
     验证所有必填字段，若有缺失则在单条错误信息中报告全部缺失字段名称，
     然后以 sys.exit(1) 终止程序。
@@ -22,18 +26,29 @@ def load_config(path: str = "config.yaml") -> AppConfig:
         AppConfig 对象
 
     Raises:
-        SystemExit: 文件不存在或格式无效时退出
+        SystemExit: 配置无效时退出
     """
-    # 1. 尝试打开并解析配置文件
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw: Any = yaml.safe_load(f)
-    except FileNotFoundError:
-        print(f"配置文件 {path} 未找到", file=sys.stderr)
-        sys.exit(1)
-    except yaml.YAMLError as e:
-        print(f"配置文件格式错误: {e}", file=sys.stderr)
-        sys.exit(1)
+    # 1. 尝试从环境变量或文件加载 YAML
+    config_yaml_env = os.environ.get("ETF_CONFIG_YAML")
+
+    if config_yaml_env:
+        # 从环境变量加载
+        try:
+            raw: Any = yaml.safe_load(config_yaml_env)
+        except yaml.YAMLError as e:
+            print(f"环境变量 ETF_CONFIG_YAML 格式错误: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        # 从文件加载
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = yaml.safe_load(f)
+        except FileNotFoundError:
+            print(f"配置文件 {path} 未找到", file=sys.stderr)
+            sys.exit(1)
+        except yaml.YAMLError as e:
+            print(f"配置文件格式错误: {e}", file=sys.stderr)
+            sys.exit(1)
 
     if not isinstance(raw, dict):
         print("配置文件格式错误: 期望 YAML 字典格式", file=sys.stderr)
