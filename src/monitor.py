@@ -6,6 +6,7 @@ continuing to process remaining ETFs on individual failure.
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.akshare_source import AKShareSource
 from src.data_source import DataSourceManager
@@ -37,6 +38,9 @@ class Monitor:
     - 处理 per-ETF 错误，不中断整体流程
     """
 
+    _THREAD_POOL_MAX_WORKERS: int = 10
+    _PIPELINE_TIMEOUT_SECONDS: int = 30
+
     def __init__(self, config: AppConfig) -> None:
         """初始化 Monitor。
 
@@ -44,8 +48,9 @@ class Monitor:
             config: 应用程序完整配置对象
         """
         self._config = config
+        self._akshare_source = AKShareSource()
         self._data_source_manager = DataSourceManager(
-            primary=AKShareSource(),
+            primary=self._akshare_source,
             fallback=HaoETFSource(),
         )
         self._notifier = TelegramNotifier(config.telegram)
@@ -57,20 +62,21 @@ class Monitor:
         """执行完整监控流程，返回所有 ETF 的监控结果。
 
         流程：
-        1. 遍历每只 ETF，获取数据、计算溢价率、生成买入建议
-        2. 单只 ETF 失败时记录错误并继续处理剩余 ETF
-        3. 格式化所有结果并输出
-        4. 如果 Telegram 已启用，发送通知
+        1. 清除 AKShare 缓存，确保本周期获取新数据
+        2. 使用 ThreadPoolExecutor 并发处理所有 ETF
+        3. 收集结果，保持配置顺序
+        4. 格式化所有结果并输出
+        5. 如果 Telegram 已启用，发送通知
 
         Returns:
             所有 ETF 的 MonitorResult 列表
         """
         logger.info("开始执行监控流程")
-        results: list[MonitorResult] = []
 
-        for etf_config in self._config.etfs:
-            result = self._process_etf(etf_config)
-            results.append(result)
+        # Reset per-cycle cache so the first fetch triggers a fresh API call
+        self._akshare_source.invalidate_cache()
+
+        results: list[MonitorResult] = self._process_etfs_parallel()
 
         # 格式化并输出到标准输出
         plain_output = format_plain_text(results)
@@ -93,8 +99,117 @@ class Monitor:
         logger.info("监控流程执行完毕，共处理 %d 只 ETF", len(results))
         return results
 
+    def _process_etfs_parallel(self) -> list[MonitorResult]:
+        """并发处理所有 ETF，保持配置顺序返回结果。
+
+        如果 ThreadPoolExecutor 创建失败，回退到顺序处理。
+
+        Returns:
+            所有 ETF 的 MonitorResult 列表，顺序与 config.etfs 一致
+        """
+        etf_configs = self._config.etfs
+        num_etfs = len(etf_configs)
+
+        try:
+            executor = ThreadPoolExecutor(max_workers=self._THREAD_POOL_MAX_WORKERS)
+        except Exception as e:
+            logger.warning(
+                "ThreadPoolExecutor 创建失败，回退到顺序处理: %s", e
+            )
+            return self._process_etfs_sequential()
+
+        results: list[MonitorResult | None] = [None] * num_etfs
+
+        try:
+            # Submit all pipelines, tracking index for order preservation
+            future_to_index = {}
+            for i, etf_config in enumerate(etf_configs):
+                future = executor.submit(self._process_etf, etf_config)
+                future_to_index[future] = i
+
+            # Collect results with per-pipeline timeout
+            for future in as_completed(future_to_index):
+                idx = future_to_index[future]
+                etf_config = etf_configs[idx]
+                try:
+                    result = future.result(timeout=self._PIPELINE_TIMEOUT_SECONDS)
+                    results[idx] = result
+                except TimeoutError:
+                    logger.error(
+                        "[%s] ETF 处理超时 (%ds)",
+                        etf_config.code,
+                        self._PIPELINE_TIMEOUT_SECONDS,
+                    )
+                    results[idx] = MonitorResult(
+                        code=etf_config.code,
+                        name=etf_config.name,
+                        price=None,
+                        iopv=None,
+                        premium_rate=None,
+                        target_amount=etf_config.target_amount,
+                        bought_amount=etf_config.bought_amount,
+                        remaining_target=etf_config.target_amount - etf_config.bought_amount,
+                        suggested_buy_min=None,
+                        suggested_buy_max=None,
+                        suggestion=None,
+                        source=None,
+                        update_time=None,
+                        error="处理超时",
+                    )
+                except Exception as e:
+                    logger.error(
+                        "[%s] ETF 处理异常: %s", etf_config.code, e
+                    )
+                    results[idx] = MonitorResult(
+                        code=etf_config.code,
+                        name=etf_config.name,
+                        price=None,
+                        iopv=None,
+                        premium_rate=None,
+                        target_amount=etf_config.target_amount,
+                        bought_amount=etf_config.bought_amount,
+                        remaining_target=etf_config.target_amount - etf_config.bought_amount,
+                        suggested_buy_min=None,
+                        suggested_buy_max=None,
+                        suggestion=None,
+                        source=None,
+                        update_time=None,
+                        error=str(e),
+                    )
+        finally:
+            executor.shutdown(wait=False)
+
+        # Type narrowing: all slots should be filled
+        return [r for r in results if r is not None]
+
+    def _process_etfs_sequential(self) -> list[MonitorResult]:
+        """顺序处理所有 ETF（ThreadPoolExecutor 创建失败时的回退方案）。
+
+        Returns:
+            所有 ETF 的 MonitorResult 列表
+        """
+        results: list[MonitorResult] = []
+        for etf_config in self._config.etfs:
+            result = self._process_etf(etf_config)
+            results.append(result)
+        return results
+
     def _process_etf(self, etf_config) -> MonitorResult:
         """处理单只 ETF 的完整监控流程。
+
+        Thread Safety:
+            This method is called concurrently from ThreadPoolExecutor threads.
+            It is safe for parallel execution because:
+            - AKShareSource._df_cache: read-only after pre-fetch populates it
+              (invalidate_cache is called before threads launch).
+            - PremiumStore.save()/query(): each ETF operates on its own file
+              ({code}.json), so no cross-file contention exists.
+            - StrategyEngine.get_adjusted_rules(): delegates to PremiumStore
+              with per-ETF file isolation.
+            - DiscountAlert.check(): _alerted_codes set is protected by a
+              threading.Lock to prevent duplicate alerts under concurrency.
+            - TelegramNotifier.send(): stateless HTTP POST using only immutable
+              config; concurrent sends to Telegram API are independent.
 
         Args:
             etf_config: 单只 ETF 的配置

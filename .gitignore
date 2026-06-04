@@ -30,6 +30,9 @@ htmlcov/
 .pytest_cache/
 .hypothesis/
 
+# Kiro spec 文件（开发工具产物）
+.kiro/
+
 # 发布
 dist/
 build/

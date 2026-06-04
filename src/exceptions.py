@@ -22,6 +22,8 @@ class ConfigError(Exception):
 class StoreError(Exception):
     """存储操作失败"""
 
-    def __init__(self, message: str):
-        self.message = message
-        super().__init__(message)
+    def __init__(self, operation: str, code: str, detail: str):
+        self.operation = operation
+        self.code = code
+        self.detail = detail
+        super().__init__(f"[{operation}] {code}: {detail}")
