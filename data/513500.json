@@ -31,6 +31,18 @@
     {
       "premium_rate": 6.9,
       "timestamp": "2026-06-03T17:58:49"
+    },
+    {
+      "premium_rate": 6.9,
+      "timestamp": "2026-06-04T09:12:36"
+    },
+    {
+      "premium_rate": 6.25,
+      "timestamp": "2026-06-04T09:16:58"
+    },
+    {
+      "premium_rate": 5.84,
+      "timestamp": "2026-06-04T09:22:23"
     }
   ]
 }

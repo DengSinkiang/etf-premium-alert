@@ -74,8 +74,6 @@ def load_config(path: str = "config.yaml") -> AppConfig:
                 missing_fields.append(f"etfs[{i}].code")
             if "name" not in etf:
                 missing_fields.append(f"etfs[{i}].name")
-            if "target_amount" not in etf:
-                missing_fields.append(f"etfs[{i}].target_amount")
 
     # 如果有缺失字段，报告并退出
     if missing_fields:
@@ -100,7 +98,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             ETFConfig(
                 code=str(etf_raw["code"]),
                 name=str(etf_raw["name"]),
-                target_amount=float(etf_raw["target_amount"]),
+                target_amount=float(etf_raw.get("target_amount", 0.0)),
                 bought_amount=float(etf_raw.get("bought_amount", 0.0)),
                 premium_rules=premium_rules,
                 sell_threshold=float(etf_raw.get("sell_threshold", 8.0)),
