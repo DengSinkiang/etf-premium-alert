@@ -63,6 +63,25 @@ class AppConfig:
 
 
 @dataclass
+class TrendInfo:
+    """Premium rate trend information."""
+
+    arrow: str  # "↑" | "↓" | "→"
+    delta: float  # Signed percentage point change (e.g., +0.50, -0.30)
+    previous_rate: float  # The previous premium rate used for comparison
+
+
+@dataclass
+class Transaction:
+    """Position tracking transaction record."""
+
+    code: str  # ETF code
+    type: str  # "buy" | "sell"
+    amount: float  # Yuan amount, rounded to 2 decimal places
+    timestamp: str  # ISO 8601 with second precision, e.g. "2024-01-15T10:30:00"
+
+
+@dataclass
 class MonitorResult:
     """单只 ETF 的完整监控结果"""
 
@@ -82,6 +101,7 @@ class MonitorResult:
     error: Optional[str]  # 失败时的错误信息
     volume: float | None = None  # 成交量（手），仅高溢价时有值
     turnover_rate: float | None = None  # 换手率（%），仅高溢价时有值
+    trend_info: TrendInfo | None = None  # 溢价率趋势信息
 
 
 @dataclass
@@ -147,6 +167,8 @@ class ETFDailySummary:
     buy_triggered: bool  # 是否触发过买入建议
     sell_triggered: bool  # 是否触发过卖出建议
     status: str  # "normal" | "no_data" | "read_error"
+    open_premium: float | None = None  # 开盘溢价率（当日第一条记录）
+    trend_path: str | None = None  # 日内走势路径，如 "低→高→低" 或 "持续上升"
 
 
 @dataclass

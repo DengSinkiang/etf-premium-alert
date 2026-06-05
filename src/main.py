@@ -17,6 +17,7 @@ import sys
 from src.config import load_config
 from src.logger import setup_logging
 from src.monitor import Monitor
+from src.trading_calendar import TradingCalendar
 
 logger = logging.getLogger("monitor")
 
@@ -58,6 +59,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         default=False,
         help="生成并推送每日摘要报告后退出",
+    )
+    parser.add_argument(
+        "--no-quiet",
+        action="store_true",
+        default=False,
+        help="禁用安静模式，推送所有结果",
     )
     return parser.parse_args(argv)
 
@@ -125,8 +132,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.summary:
         return _run_summary(config)
 
+    # Trading calendar check: skip monitoring on non-trading days
+    # unless --force or --summary is set
+    if not args.force:
+        try:
+            if not TradingCalendar().is_trading_day():
+                logger.info("今日非交易日，跳过监控")
+                return 0
+        except Exception as e:
+            logger.warning("交易日历检查失败: %s，继续执行", e)
+
     # --once has highest priority: always run once and exit
-    monitor = Monitor(config)
+    quiet_mode = not args.no_quiet
+    monitor = Monitor(config, quiet_mode=quiet_mode)
     monitor.run()
 
     return 0

@@ -11,10 +11,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.akshare_source import AKShareSource
 from src.data_source import DataSourceManager
 from src.discount_alert import DiscountAlert
-from src.formatter import format_plain_text, format_telegram_markdown
+from src.formatter import format_compact_telegram, format_plain_text, format_telegram_markdown, format_trend_indicator, format_buy_suggestion_with_lots
 from src.haoetf_source import HaoETFSource
-from src.models import AppConfig, DiscountAlertResult, MonitorResult
+from src.exceptions import StoreError
+from src.models import AppConfig, DiscountAlertResult, ETFConfig, MonitorResult, TrendInfo
 from src.notifier import TelegramNotifier
+from src.position_store import PositionStore
 from src.premium_calculator import (
     calculate_premium_rate,
     calculate_suggested_buy,
@@ -41,13 +43,15 @@ class Monitor:
     _THREAD_POOL_MAX_WORKERS: int = 10
     _PIPELINE_TIMEOUT_SECONDS: int = 30
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self, config: AppConfig, quiet_mode: bool = True) -> None:
         """初始化 Monitor。
 
         Args:
             config: 应用程序完整配置对象
+            quiet_mode: 是否启用安静模式（默认启用）。启用后，无操作信号时不推送通知。
         """
         self._config = config
+        self._quiet_mode = quiet_mode
         self._akshare_source = AKShareSource()
         self._data_source_manager = DataSourceManager(
             primary=self._akshare_source,
@@ -56,7 +60,9 @@ class Monitor:
         self._notifier = TelegramNotifier(config.telegram)
         self._discount_alert = DiscountAlert(config)
         self._premium_store = PremiumStore(data_dir=config.data_dir)
+        self._position_store = PositionStore(data_dir=config.data_dir)
         self._strategy = StrategyEngine(config, self._premium_store)
+        self._cycle_discount_alerts: list[DiscountAlertResult] = []
 
     def run(self) -> list[MonitorResult]:
         """执行完整监控流程，返回所有 ETF 的监控结果。
@@ -65,8 +71,9 @@ class Monitor:
         1. 清除 AKShare 缓存，确保本周期获取新数据
         2. 使用 ThreadPoolExecutor 并发处理所有 ETF
         3. 收集结果，保持配置顺序
-        4. 格式化所有结果并输出
-        5. 如果 Telegram 已启用，发送通知
+        4. 构建趋势信息映射和折价提醒列表
+        5. 格式化所有结果并输出（含趋势指标和手数建议）
+        6. 根据安静模式和操作信号决定 Telegram 推送行为
 
         Returns:
             所有 ETF 的 MonitorResult 列表
@@ -76,14 +83,20 @@ class Monitor:
         # Reset per-cycle cache so the first fetch triggers a fresh API call
         self._akshare_source.invalidate_cache()
 
+        # Reset per-cycle discount alerts tracker
+        self._cycle_discount_alerts: list[DiscountAlertResult] = []
+
         results: list[MonitorResult] = self._process_etfs_parallel()
 
-        # 格式化并输出到标准输出
-        plain_output = format_plain_text(results)
+        # Build trend_map from results
+        trend_map = {r.code: r.trend_info for r in results if r.trend_info is not None}
 
         # 策略引擎：卖出建议和多 ETF 对比
         sell_suggestions = self._strategy.get_sell_suggestions(results)
         comparisons = self._strategy.get_comparisons(results)
+
+        # 格式化并输出到标准输出（含趋势指标和手数建议）
+        plain_output = self._format_plain_text_with_enhancements(results, trend_map, sell_suggestions)
 
         # 附加策略输出到纯文本
         strategy_plain = self._format_strategy_plain(sell_suggestions, comparisons)
@@ -92,9 +105,22 @@ class Monitor:
 
         print(plain_output)
 
-        # Telegram 通知
+        # Telegram 通知：根据安静模式决定推送行为
         if self._config.telegram.enabled:
-            self._send_telegram_notification(results, sell_suggestions, comparisons)
+            has_signal = self._has_actionable_signal(
+                results, sell_suggestions, self._cycle_discount_alerts
+            )
+
+            if self._quiet_mode and not has_signal:
+                logger.info("quiet mode: no actionable signals")
+            elif self._quiet_mode and has_signal:
+                # Quiet mode with actionable signal: use compact format
+                self._send_compact_telegram(
+                    results, trend_map, sell_suggestions, self._cycle_discount_alerts
+                )
+            else:
+                # --no-quiet mode: send full format
+                self._send_telegram_notification(results, sell_suggestions, comparisons)
 
         logger.info("监控流程执行完毕，共处理 %d 只 ETF", len(results))
         return results
@@ -220,8 +246,8 @@ class Monitor:
         code = etf_config.code
         name = etf_config.name
         target_amount = etf_config.target_amount
-        bought_amount = etf_config.bought_amount
-        remaining_target = target_amount - bought_amount
+        bought_amount = self._compute_effective_bought_amount(etf_config)
+        remaining_target = max(0.0, target_amount - bought_amount)
 
         logger.info("开始处理 ETF: [%s] %s", code, name)
 
@@ -289,6 +315,9 @@ class Monitor:
                 error=error_msg,
             )
 
+        # 2.5 获取趋势信息
+        trend_info = self._get_trend_info(code, premium_rate)
+
         # 3. 计算建议买入金额（使用动态调整后的阈值）
         adjusted_rules = self._strategy.get_adjusted_rules(etf_config, premium_rate)
         suggested_buy_min, suggested_buy_max = calculate_suggested_buy(
@@ -311,6 +340,7 @@ class Monitor:
         )
         if discount_result is not None:
             self._send_discount_alert(discount_result)
+            self._cycle_discount_alerts.append(discount_result)
 
         # 6. 成交量/换手率条件展示：仅当溢价率 >= alert_threshold 时附带
         volume = None
@@ -345,7 +375,206 @@ class Monitor:
             error=None,
             volume=volume,
             turnover_rate=turnover_rate,
+            trend_info=trend_info,
         )
+
+    def _compute_effective_bought_amount(self, etf_config: ETFConfig) -> float:
+        """Compute effective bought amount from config + recorded transactions.
+
+        Delegates to PositionStore.compute_effective_amount which computes:
+        config.bought_amount + sum(buys) - sum(sells), clamped to >= 0.
+
+        On StoreError (corrupted JSON or I/O failure), falls back to
+        config.bought_amount to avoid breaking the monitoring flow.
+
+        Args:
+            etf_config: The ETF configuration object.
+
+        Returns:
+            The effective bought amount (>= 0).
+        """
+        try:
+            return self._position_store.compute_effective_amount(
+                etf_config.code, etf_config.bought_amount
+            )
+        except StoreError as e:
+            logger.warning(
+                "[%s] PositionStore 读取失败，使用配置中的 bought_amount: %s",
+                etf_config.code,
+                e,
+            )
+            return etf_config.bought_amount
+
+    def _get_trend_info(self, code: str, current_premium: float) -> TrendInfo | None:
+        """Compare current premium against most recent PremiumStore record.
+
+        Uses PremiumStore.query(code, lookback_days=1) to retrieve recent
+        records. The last item in the returned list is the most recent.
+
+        Args:
+            code: ETF code.
+            current_premium: The current premium rate percentage.
+
+        Returns:
+            TrendInfo with arrow and delta, or None if no previous record
+            exists or a store error occurs.
+        """
+        try:
+            records = self._premium_store.query(code, lookback_days=1)
+        except StoreError as e:
+            logger.warning("[%s] PremiumStore 读取失败，跳过趋势指标: %s", code, e)
+            return None
+
+        if not records:
+            return None
+
+        previous_record = records[-1]
+        delta = current_premium - previous_record.premium_rate
+
+        if delta >= 0.01:
+            arrow = "↑"
+        elif delta <= -0.01:
+            arrow = "↓"
+        else:
+            arrow = "→"
+
+        return TrendInfo(arrow=arrow, delta=delta, previous_rate=previous_record.premium_rate)
+
+    def _has_actionable_signal(
+        self,
+        results: list[MonitorResult],
+        sell_suggestions: list,
+        discount_alerts: list[DiscountAlertResult],
+    ) -> bool:
+        """判断本次监控周期是否存在可操作信号。
+
+        Returns True if any of the following conditions hold:
+        - Any result has suggested_buy_min > 0 (and suggested_buy_min is not None)
+        - sell_suggestions is non-empty
+        - discount_alerts is non-empty
+
+        Args:
+            results: 所有 ETF 的监控结果
+            sell_suggestions: 卖出建议列表
+            discount_alerts: 折价提醒列表
+
+        Returns:
+            True if at least one actionable signal is detected.
+        """
+        if sell_suggestions:
+            return True
+        if discount_alerts:
+            return True
+        for result in results:
+            if result.suggested_buy_min is not None and result.suggested_buy_min > 0:
+                return True
+        return False
+
+    def _format_plain_text_with_enhancements(
+        self,
+        results: list[MonitorResult],
+        trend_map: dict[str, TrendInfo],
+        sell_suggestions: list,
+    ) -> str:
+        """格式化增强版纯文本输出，包含趋势指标和手数建议。
+
+        在原有纯文本基础上：
+        - 溢价率后附加趋势箭头和变化量
+        - 买入建议以手数格式显示
+
+        Args:
+            results: 所有 ETF 的监控结果
+            trend_map: code -> TrendInfo 映射
+            sell_suggestions: 卖出建议列表
+
+        Returns:
+            格式化后的纯文本字符串
+        """
+        from datetime import datetime as dt
+
+        lines: list[str] = []
+
+        # Header with timestamp
+        header_time = dt.now().strftime("%Y-%m-%d %H:%M:%S")
+        lines.append(f"=== QDII ETF 溢价率监控 ({header_time}) ===")
+        lines.append("")
+
+        for i, result in enumerate(results):
+            if i > 0:
+                lines.append("---")
+                lines.append("")
+
+            if result.error is not None:
+                # Error case
+                lines.append(f"[{result.code}] {result.name}")
+                lines.append(f"  错误: {result.error}")
+                lines.append("")
+            else:
+                # Normal case with all fields
+                lines.append(f"[{result.code}] {result.name}")
+                lines.append(f"  当前价格:     {result.price}")
+                lines.append(f"  估算净值:     {result.iopv}")
+
+                # 溢价率 + 趋势指标
+                trend = trend_map.get(result.code)
+                trend_str = format_trend_indicator(trend)
+                if trend_str:
+                    lines.append(f"  当前溢价率:   {result.premium_rate}% {trend_str}")
+                else:
+                    lines.append(f"  当前溢价率:   {result.premium_rate}%")
+
+                lines.append(f"  目标仓位:     {result.target_amount} 元")
+                lines.append(f"  已买金额:     {result.bought_amount} 元")
+                lines.append(f"  剩余目标:     {result.remaining_target} 元")
+
+                # 买入建议以手数格式显示
+                if result.suggested_buy_min is not None and result.suggested_buy_max is not None:
+                    lot_suggestion = format_buy_suggestion_with_lots(
+                        result.suggested_buy_min, result.suggested_buy_max, result.price
+                    )
+                    lines.append(f"  {lot_suggestion}")
+                else:
+                    lines.append(f"  建议买入区间: {result.suggested_buy_min} ~ {result.suggested_buy_max} 元")
+
+                lines.append(f"  操作建议:     {result.suggestion}")
+                lines.append(f"  数据来源:     {result.source}")
+
+                from src.formatter import _format_update_time
+                lines.append(f"  更新时间:     {_format_update_time(result.update_time)}")
+                # 成交量/换手率展示（仅高溢价时有值）
+                if result.volume is not None or result.turnover_rate is not None:
+                    from src.formatter import format_volume_info_plain
+                    lines.append(f"  {format_volume_info_plain(result.volume, result.turnover_rate)}")
+                lines.append("")
+
+        return "\n".join(lines)
+
+    def _send_compact_telegram(
+        self,
+        results: list[MonitorResult],
+        trend_map: dict[str, TrendInfo],
+        sell_suggestions: list,
+        discount_alerts: list[DiscountAlertResult],
+    ) -> None:
+        """发送紧凑格式 Telegram 通知。
+
+        Args:
+            results: 所有 ETF 的监控结果
+            trend_map: code -> TrendInfo 映射
+            sell_suggestions: 卖出建议列表
+            discount_alerts: 折价提醒列表
+        """
+        try:
+            message = format_compact_telegram(
+                results, trend_map, sell_suggestions, discount_alerts
+            )
+            success = self._notifier.send(message)
+            if success:
+                logger.info("Telegram 紧凑格式通知发送成功")
+            else:
+                logger.warning("Telegram 紧凑格式通知发送失败")
+        except Exception as e:
+            logger.error("Telegram 紧凑格式通知发送时发生未预期错误: %s", e)
 
     def _send_telegram_notification(self, results: list[MonitorResult],
                                     sell_suggestions=None, comparisons=None) -> None:

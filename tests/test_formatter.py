@@ -10,8 +10,9 @@ from src.formatter import (
     format_volume_info_plain,
     format_daily_summary_plain,
     format_daily_summary_telegram,
+    format_trend_indicator,
 )
-from src.models import MonitorResult, DiscountAlertResult, ETFDailySummary, DailySummaryReport
+from src.models import MonitorResult, DiscountAlertResult, ETFDailySummary, DailySummaryReport, TrendInfo
 
 
 def _make_normal_result() -> MonitorResult:
@@ -601,3 +602,265 @@ class TestFormatDailySummaryTelegram:
         # Dots and minus should be escaped in percentages
         assert "3\\.50" in output
         assert "\\-0\\.20" in output or "0\\.20" in output
+
+
+class TestDailySummaryTrendPlain:
+    """Tests for daily summary trend info in plain text (Task 7.2)."""
+
+    def test_trend_shown_when_open_and_close_available(self):
+        summary = ETFDailySummary(
+            code="513500",
+            name="博时标普500ETF",
+            max_premium=3.50,
+            min_premium=-0.20,
+            close_premium=2.80,
+            buy_triggered=False,
+            sell_triggered=False,
+            status="normal",
+            open_premium=1.57,
+            trend_path=None,
+        )
+        report = DailySummaryReport(date="2024-01-15", summaries=[summary])
+        output = format_daily_summary_plain(report)
+        assert "日内走势:" in output
+        assert "↑" in output
+        assert "+1.23%" in output
+
+    def test_trend_down_arrow(self):
+        summary = ETFDailySummary(
+            code="513500",
+            name="博时标普500ETF",
+            max_premium=3.50,
+            min_premium=-0.20,
+            close_premium=1.00,
+            buy_triggered=False,
+            sell_triggered=False,
+            status="normal",
+            open_premium=1.58,
+            trend_path=None,
+        )
+        report = DailySummaryReport(date="2024-01-15", summaries=[summary])
+        output = format_daily_summary_plain(report)
+        assert "↓" in output
+        assert "-0.58%" in output
+
+    def test_trend_right_arrow_when_equal(self):
+        summary = ETFDailySummary(
+            code="513500",
+            name="博时标普500ETF",
+            max_premium=3.50,
+            min_premium=-0.20,
+            close_premium=2.00,
+            buy_triggered=False,
+            sell_triggered=False,
+            status="normal",
+            open_premium=2.00,
+            trend_path=None,
+        )
+        report = DailySummaryReport(date="2024-01-15", summaries=[summary])
+        output = format_daily_summary_plain(report)
+        assert "→" in output
+        assert "+0.00%" in output
+
+    def test_trend_not_shown_when_open_is_none(self):
+        summary = ETFDailySummary(
+            code="513500",
+            name="博时标普500ETF",
+            max_premium=3.50,
+            min_premium=-0.20,
+            close_premium=2.00,
+            buy_triggered=False,
+            sell_triggered=False,
+            status="normal",
+            open_premium=None,
+            trend_path=None,
+        )
+        report = DailySummaryReport(date="2024-01-15", summaries=[summary])
+        output = format_daily_summary_plain(report)
+        assert "日内走势" not in output
+
+    def test_trend_path_shown_when_available(self):
+        summary = ETFDailySummary(
+            code="513500",
+            name="博时标普500ETF",
+            max_premium=3.50,
+            min_premium=-0.20,
+            close_premium=2.00,
+            buy_triggered=False,
+            sell_triggered=False,
+            status="normal",
+            open_premium=1.00,
+            trend_path="低→高→低",
+        )
+        report = DailySummaryReport(date="2024-01-15", summaries=[summary])
+        output = format_daily_summary_plain(report)
+        assert "走势路径:" in output
+        assert "低→高→低" in output
+
+    def test_trend_path_not_shown_when_none(self):
+        summary = ETFDailySummary(
+            code="513500",
+            name="博时标普500ETF",
+            max_premium=3.50,
+            min_premium=-0.20,
+            close_premium=2.00,
+            buy_triggered=False,
+            sell_triggered=False,
+            status="normal",
+            open_premium=1.00,
+            trend_path=None,
+        )
+        report = DailySummaryReport(date="2024-01-15", summaries=[summary])
+        output = format_daily_summary_plain(report)
+        assert "走势路径" not in output
+
+    def test_no_data_status_omits_trend(self):
+        summary = ETFDailySummary(
+            code="513500",
+            name="博时标普500ETF",
+            max_premium=None,
+            min_premium=None,
+            close_premium=None,
+            buy_triggered=False,
+            sell_triggered=False,
+            status="no_data",
+            open_premium=None,
+            trend_path=None,
+        )
+        report = DailySummaryReport(date="2024-01-15", summaries=[summary])
+        output = format_daily_summary_plain(report)
+        assert "日内走势" not in output
+        assert "走势路径" not in output
+
+
+class TestDailySummaryTrendTelegram:
+    """Tests for daily summary trend info in Telegram format (Task 7.2)."""
+
+    def test_trend_shown_when_open_and_close_available(self):
+        summary = ETFDailySummary(
+            code="513500",
+            name="博时标普500ETF",
+            max_premium=3.50,
+            min_premium=-0.20,
+            close_premium=2.80,
+            buy_triggered=False,
+            sell_triggered=False,
+            status="normal",
+            open_premium=1.57,
+            trend_path=None,
+        )
+        report = DailySummaryReport(date="2024-01-15", summaries=[summary])
+        output = format_daily_summary_telegram(report)
+        assert "`日内走势:`" in output
+        assert "↑" in output
+        # delta = 2.80 - 1.57 = 1.23
+        assert "1\\.23" in output
+
+    def test_trend_down_arrow_telegram(self):
+        summary = ETFDailySummary(
+            code="513500",
+            name="博时标普500ETF",
+            max_premium=3.50,
+            min_premium=-0.20,
+            close_premium=1.00,
+            buy_triggered=False,
+            sell_triggered=False,
+            status="normal",
+            open_premium=1.58,
+            trend_path=None,
+        )
+        report = DailySummaryReport(date="2024-01-15", summaries=[summary])
+        output = format_daily_summary_telegram(report)
+        assert "↓" in output
+        assert "0\\.58" in output
+
+    def test_trend_path_shown_telegram(self):
+        summary = ETFDailySummary(
+            code="513500",
+            name="博时标普500ETF",
+            max_premium=3.50,
+            min_premium=-0.20,
+            close_premium=2.00,
+            buy_triggered=False,
+            sell_triggered=False,
+            status="normal",
+            open_premium=1.00,
+            trend_path="低→高→低",
+        )
+        report = DailySummaryReport(date="2024-01-15", summaries=[summary])
+        output = format_daily_summary_telegram(report)
+        assert "`走势路径:`" in output
+        assert "低→高→低" in output
+
+    def test_trend_path_not_shown_when_none_telegram(self):
+        summary = ETFDailySummary(
+            code="513500",
+            name="博时标普500ETF",
+            max_premium=3.50,
+            min_premium=-0.20,
+            close_premium=2.00,
+            buy_triggered=False,
+            sell_triggered=False,
+            status="normal",
+            open_premium=1.00,
+            trend_path=None,
+        )
+        report = DailySummaryReport(date="2024-01-15", summaries=[summary])
+        output = format_daily_summary_telegram(report)
+        assert "走势路径" not in output
+
+    def test_trend_not_shown_when_open_is_none_telegram(self):
+        summary = ETFDailySummary(
+            code="513500",
+            name="博时标普500ETF",
+            max_premium=3.50,
+            min_premium=-0.20,
+            close_premium=2.00,
+            buy_triggered=False,
+            sell_triggered=False,
+            status="normal",
+            open_premium=None,
+            trend_path=None,
+        )
+        report = DailySummaryReport(date="2024-01-15", summaries=[summary])
+        output = format_daily_summary_telegram(report)
+        assert "日内走势" not in output
+
+
+class TestFormatTrendIndicator:
+    """Tests for format_trend_indicator (Task 3.2)."""
+
+    def test_none_returns_empty_string(self):
+        assert format_trend_indicator(None) == ""
+
+    def test_positive_delta_shows_up_arrow_with_plus(self):
+        trend = TrendInfo(arrow="↑", delta=0.50, previous_rate=2.00)
+        assert format_trend_indicator(trend) == "↑ +0.50%"
+
+    def test_negative_delta_shows_down_arrow_with_minus(self):
+        trend = TrendInfo(arrow="↓", delta=-0.30, previous_rate=2.00)
+        assert format_trend_indicator(trend) == "↓ -0.30%"
+
+    def test_zero_delta_shows_right_arrow_with_plus(self):
+        trend = TrendInfo(arrow="→", delta=0.00, previous_rate=2.00)
+        assert format_trend_indicator(trend) == "→ +0.00%"
+
+    def test_exactly_two_decimal_places(self):
+        trend = TrendInfo(arrow="↑", delta=1.0, previous_rate=1.00)
+        assert format_trend_indicator(trend) == "↑ +1.00%"
+
+    def test_large_positive_delta(self):
+        trend = TrendInfo(arrow="↑", delta=5.67, previous_rate=0.00)
+        assert format_trend_indicator(trend) == "↑ +5.67%"
+
+    def test_large_negative_delta(self):
+        trend = TrendInfo(arrow="↓", delta=-3.21, previous_rate=5.00)
+        assert format_trend_indicator(trend) == "↓ -3.21%"
+
+    def test_small_positive_near_threshold(self):
+        trend = TrendInfo(arrow="↑", delta=0.01, previous_rate=1.00)
+        assert format_trend_indicator(trend) == "↑ +0.01%"
+
+    def test_small_negative_near_threshold(self):
+        trend = TrendInfo(arrow="↓", delta=-0.01, previous_rate=1.00)
+        assert format_trend_indicator(trend) == "↓ -0.01%"

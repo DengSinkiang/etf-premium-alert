@@ -201,17 +201,160 @@ class TestMainWithSummary:
         assert result == 0
         mock_run_summary.assert_called_once_with(sample_config)
 
+    @patch("src.main.TradingCalendar")
     @patch("src.main.Monitor")
     @patch("src.main.load_config")
     @patch("src.main.setup_logging")
-    def test_main_without_summary_runs_monitor(self, mock_logging, mock_load, mock_monitor_cls, sample_config):
+    def test_main_without_summary_runs_monitor(self, mock_logging, mock_load, mock_monitor_cls, mock_calendar_cls, sample_config):
         """main() runs Monitor when --summary is not passed."""
         mock_load.return_value = sample_config
         mock_monitor = MagicMock()
         mock_monitor_cls.return_value = mock_monitor
+        mock_calendar = MagicMock()
+        mock_calendar.is_trading_day.return_value = True
+        mock_calendar_cls.return_value = mock_calendar
 
         result = main([])
 
         assert result == 0
-        mock_monitor_cls.assert_called_once_with(sample_config)
+        mock_monitor_cls.assert_called_once_with(sample_config, quiet_mode=True)
         mock_monitor.run.assert_called_once()
+
+
+class TestNoQuietFlag:
+    """Tests for --no-quiet flag."""
+
+    def test_no_quiet_flag_default_false(self):
+        """--no-quiet defaults to False when not specified."""
+        args = parse_args([])
+        assert args.no_quiet is False
+
+    def test_no_quiet_flag_set(self):
+        """--no-quiet is True when specified."""
+        args = parse_args(["--no-quiet"])
+        assert args.no_quiet is True
+
+    def test_no_quiet_with_force(self):
+        """--no-quiet can be combined with --force."""
+        args = parse_args(["--no-quiet", "--force"])
+        assert args.no_quiet is True
+        assert args.force is True
+
+    @patch("src.main.TradingCalendar")
+    @patch("src.main.Monitor")
+    @patch("src.main.load_config")
+    @patch("src.main.setup_logging")
+    def test_no_quiet_passes_quiet_mode_false(
+        self, mock_logging, mock_load, mock_monitor_cls, mock_calendar_cls, sample_config
+    ):
+        """main(["--no-quiet"]) passes quiet_mode=False to Monitor."""
+        mock_load.return_value = sample_config
+        mock_monitor = MagicMock()
+        mock_monitor_cls.return_value = mock_monitor
+        mock_calendar = MagicMock()
+        mock_calendar.is_trading_day.return_value = True
+        mock_calendar_cls.return_value = mock_calendar
+
+        result = main(["--no-quiet"])
+
+        assert result == 0
+        mock_monitor_cls.assert_called_once_with(sample_config, quiet_mode=False)
+
+
+class TestTradingCalendarIntegration:
+    """Tests for TradingCalendar integration in main()."""
+
+    @patch("src.main.TradingCalendar")
+    @patch("src.main.Monitor")
+    @patch("src.main.load_config")
+    @patch("src.main.setup_logging")
+    def test_trading_calendar_called_in_main(
+        self, mock_logging, mock_load, mock_monitor_cls, mock_calendar_cls, sample_config
+    ):
+        """main([]) calls TradingCalendar.is_trading_day()."""
+        mock_load.return_value = sample_config
+        mock_monitor = MagicMock()
+        mock_monitor_cls.return_value = mock_monitor
+        mock_calendar = MagicMock()
+        mock_calendar.is_trading_day.return_value = True
+        mock_calendar_cls.return_value = mock_calendar
+
+        main([])
+
+        mock_calendar_cls.assert_called_once()
+        mock_calendar.is_trading_day.assert_called_once()
+
+    @patch("src.main.TradingCalendar")
+    @patch("src.main.Monitor")
+    @patch("src.main.load_config")
+    @patch("src.main.setup_logging")
+    def test_non_trading_day_skips_monitor(
+        self, mock_logging, mock_load, mock_monitor_cls, mock_calendar_cls, sample_config
+    ):
+        """main([]) skips Monitor when is_trading_day() returns False."""
+        mock_load.return_value = sample_config
+        mock_calendar = MagicMock()
+        mock_calendar.is_trading_day.return_value = False
+        mock_calendar_cls.return_value = mock_calendar
+
+        result = main([])
+
+        assert result == 0
+        mock_monitor_cls.assert_not_called()
+
+    @patch("src.main.TradingCalendar")
+    @patch("src.main.Monitor")
+    @patch("src.main.load_config")
+    @patch("src.main.setup_logging")
+    def test_calendar_exception_proceeds(
+        self, mock_logging, mock_load, mock_monitor_cls, mock_calendar_cls, sample_config
+    ):
+        """main([]) proceeds with Monitor when is_trading_day() raises."""
+        mock_load.return_value = sample_config
+        mock_monitor = MagicMock()
+        mock_monitor_cls.return_value = mock_monitor
+        mock_calendar = MagicMock()
+        mock_calendar.is_trading_day.side_effect = RuntimeError("calendar error")
+        mock_calendar_cls.return_value = mock_calendar
+
+        result = main([])
+
+        assert result == 0
+        mock_monitor_cls.assert_called_once_with(sample_config, quiet_mode=True)
+        mock_monitor.run.assert_called_once()
+
+    @patch("src.main.TradingCalendar")
+    @patch("src.main.Monitor")
+    @patch("src.main.load_config")
+    @patch("src.main.setup_logging")
+    def test_force_flag_skips_calendar(
+        self, mock_logging, mock_load, mock_monitor_cls, mock_calendar_cls, sample_config
+    ):
+        """main(["--force"]) does not call TradingCalendar."""
+        mock_load.return_value = sample_config
+        mock_monitor = MagicMock()
+        mock_monitor_cls.return_value = mock_monitor
+
+        result = main(["--force"])
+
+        assert result == 0
+        mock_calendar_cls.assert_not_called()
+        mock_monitor_cls.assert_called_once_with(sample_config, quiet_mode=True)
+        mock_monitor.run.assert_called_once()
+
+    @patch("src.main._run_summary")
+    @patch("src.main.TradingCalendar")
+    @patch("src.main.load_config")
+    @patch("src.main.setup_logging")
+    def test_summary_flag_skips_calendar(
+        self, mock_logging, mock_load, mock_calendar_cls, mock_run_summary, sample_config
+    ):
+        """main(["--summary"]) does not call TradingCalendar."""
+        mock_load.return_value = sample_config
+        mock_run_summary.return_value = 0
+
+        result = main(["--summary"])
+
+        assert result == 0
+        mock_calendar_cls.assert_not_called()
+        mock_run_summary.assert_called_once_with(sample_config)

@@ -93,6 +93,16 @@ class DailySummaryReporter:
         # Records are sorted ascending by timestamp from PremiumStore.query()
         close_premium = records[-1].premium_rate
 
+        # Compute open_premium when 2+ records exist
+        open_premium: float | None = None
+        if len(records) >= 2:
+            open_premium = records[0].premium_rate
+
+        # Compute trend_path when 3+ records exist
+        trend_path: str | None = None
+        if len(records) >= 3:
+            trend_path = self._compute_trend_path(premium_rates)
+
         # Check buy/sell triggers
         buy_triggered = self._check_buy_triggered(records, etf_config)
         sell_triggered = self._check_sell_triggered(records, etf_config)
@@ -106,6 +116,8 @@ class DailySummaryReporter:
             buy_triggered=buy_triggered,
             sell_triggered=sell_triggered,
             status="normal",
+            open_premium=open_premium,
+            trend_path=trend_path,
         )
 
     def _get_daily_records(
@@ -187,3 +199,53 @@ class DailySummaryReporter:
                 return True
 
         return False
+
+    def _compute_trend_path(self, premium_rates: list[float]) -> str:
+        """计算日内走势路径。
+
+        将记录分为 3 段，计算每段平均溢价率，按排名标记为
+        "低"/"中"/"高"，并用"→"连接。
+
+        特殊情况：
+        - 每段平均值严格递增 → "持续上升"
+        - 每段平均值严格递减 → "持续下降"
+
+        Args:
+            premium_rates: 当日所有溢价率列表（按时间升序，至少 3 条）
+
+        Returns:
+            走势路径字符串，如 "低→高→低" 或 "持续上升"
+        """
+        n = len(premium_rates)
+        seg_size = n // 3
+
+        # Divide into 3 segments
+        seg1 = premium_rates[:seg_size]
+        seg2 = premium_rates[seg_size : seg_size * 2]
+        seg3 = premium_rates[seg_size * 2 :]
+
+        # Compute averages
+        avg1 = sum(seg1) / len(seg1)
+        avg2 = sum(seg2) / len(seg2)
+        avg3 = sum(seg3) / len(seg3)
+
+        # Special cases: strictly increasing or decreasing
+        if avg1 < avg2 < avg3:
+            return "持续上升"
+        if avg1 > avg2 > avg3:
+            return "持续下降"
+
+        # Rank the 3 averages and assign labels
+        avgs = [avg1, avg2, avg3]
+        sorted_avgs = sorted(avgs)
+
+        labels = []
+        for avg in avgs:
+            if avg == sorted_avgs[0]:
+                labels.append("低")
+            elif avg == sorted_avgs[2]:
+                labels.append("高")
+            else:
+                labels.append("中")
+
+        return "→".join(labels)

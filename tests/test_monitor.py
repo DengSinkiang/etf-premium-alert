@@ -7,6 +7,7 @@ import pytest
 
 from src.models import (
     AppConfig,
+    DiscountAlertResult,
     ETFConfig,
     ETFData,
     MonitorResult,
@@ -187,7 +188,7 @@ class TestMonitorRun:
     @patch("src.monitor.AKShareSource")
     @patch("src.monitor.HaoETFSource")
     def test_telegram_notification_sent_when_enabled(self, mock_haoetf, mock_akshare, mock_dsm_cls, capsys):
-        """Test that Telegram notification is sent when enabled."""
+        """Test that Telegram notification is sent when enabled and actionable signal exists."""
         config = _make_config(telegram_enabled=True)
         monitor = Monitor(config)
 
@@ -202,9 +203,9 @@ class TestMonitorRun:
         results = monitor.run()
 
         mock_notifier.send.assert_called_once()
-        # Verify the message was formatted (contains ETF info)
+        # Verify the compact message was formatted (contains ETF name)
         sent_message = mock_notifier.send.call_args[0][0]
-        assert "513500" in sent_message
+        assert "博时标普500ETF" in sent_message
 
     @patch("src.monitor.DataSourceManager")
     @patch("src.monitor.AKShareSource")
@@ -228,10 +229,31 @@ class TestMonitorRun:
     @patch("src.monitor.DataSourceManager")
     @patch("src.monitor.AKShareSource")
     @patch("src.monitor.HaoETFSource")
-    def test_error_etf_included_in_telegram_notification(self, mock_haoetf, mock_akshare, mock_dsm_cls, capsys):
-        """Test that error info is included in Telegram notification."""
+    def test_error_etf_suppressed_in_quiet_mode(self, mock_haoetf, mock_akshare, mock_dsm_cls, capsys):
+        """Test that error-only results suppress notification in quiet mode (no actionable signal)."""
         config = _make_config(telegram_enabled=True)
-        monitor = Monitor(config)
+        monitor = Monitor(config)  # quiet_mode=True by default
+
+        mock_dsm = MagicMock()
+        mock_dsm.get_etf_data.return_value = (None, "所有数据源获取 513500 均失败")
+        monitor._data_source_manager = mock_dsm
+
+        mock_notifier = MagicMock()
+        mock_notifier.send.return_value = True
+        monitor._notifier = mock_notifier
+
+        results = monitor.run()
+
+        # In quiet mode, error-only (no actionable signal) suppresses notification
+        mock_notifier.send.assert_not_called()
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_error_etf_included_in_no_quiet_mode(self, mock_haoetf, mock_akshare, mock_dsm_cls, capsys):
+        """Test that error info is included in Telegram notification when --no-quiet mode."""
+        config = _make_config(telegram_enabled=True)
+        monitor = Monitor(config, quiet_mode=False)
 
         mock_dsm = MagicMock()
         mock_dsm.get_etf_data.return_value = (None, "所有数据源获取 513500 均失败")
@@ -521,3 +543,372 @@ class TestMonitorVolumeConditional:
         # Volume/turnover_rate from source is None, so result is None
         assert result.volume is None
         assert result.turnover_rate is None
+
+
+class TestMonitorGetTrendInfo:
+    """Tests for Monitor._get_trend_info() method (Task 3.1)."""
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_trend_up_when_delta_above_threshold(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test that arrow is '↑' when current - previous >= 0.01."""
+        from src.models import PremiumRecord
+
+        config = _make_config()
+        monitor = Monitor(config)
+
+        # Mock premium store to return a previous record with premium_rate = 2.0
+        mock_store = MagicMock()
+        mock_store.query.return_value = [
+            PremiumRecord(code="513500", premium_rate=2.0, timestamp=datetime(2024, 1, 15, 9, 0, 0))
+        ]
+        monitor._premium_store = mock_store
+
+        result = monitor._get_trend_info("513500", 2.5)
+
+        assert result is not None
+        assert result.arrow == "↑"
+        assert result.delta == pytest.approx(0.5)
+        assert result.previous_rate == 2.0
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_trend_down_when_delta_below_negative_threshold(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test that arrow is '↓' when current - previous <= -0.01."""
+        from src.models import PremiumRecord
+
+        config = _make_config()
+        monitor = Monitor(config)
+
+        mock_store = MagicMock()
+        mock_store.query.return_value = [
+            PremiumRecord(code="513500", premium_rate=3.0, timestamp=datetime(2024, 1, 15, 9, 0, 0))
+        ]
+        monitor._premium_store = mock_store
+
+        result = monitor._get_trend_info("513500", 2.5)
+
+        assert result is not None
+        assert result.arrow == "↓"
+        assert result.delta == pytest.approx(-0.5)
+        assert result.previous_rate == 3.0
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_trend_stable_when_delta_within_threshold(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test that arrow is '→' when abs(delta) < 0.01."""
+        from src.models import PremiumRecord
+
+        config = _make_config()
+        monitor = Monitor(config)
+
+        mock_store = MagicMock()
+        mock_store.query.return_value = [
+            PremiumRecord(code="513500", premium_rate=2.005, timestamp=datetime(2024, 1, 15, 9, 0, 0))
+        ]
+        monitor._premium_store = mock_store
+
+        result = monitor._get_trend_info("513500", 2.01)
+
+        assert result is not None
+        assert result.arrow == "→"
+        assert abs(result.delta) < 0.01
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_returns_none_when_no_previous_records(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test that None is returned when PremiumStore has no records."""
+        config = _make_config()
+        monitor = Monitor(config)
+
+        mock_store = MagicMock()
+        mock_store.query.return_value = []
+        monitor._premium_store = mock_store
+
+        result = monitor._get_trend_info("513500", 2.5)
+
+        assert result is None
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_returns_none_on_store_error(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test that None is returned and warning logged on StoreError."""
+        from src.exceptions import StoreError
+
+        config = _make_config()
+        monitor = Monitor(config)
+
+        mock_store = MagicMock()
+        mock_store.query.side_effect = StoreError("read", "513500", "IO error")
+        monitor._premium_store = mock_store
+
+        result = monitor._get_trend_info("513500", 2.5)
+
+        assert result is None
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_uses_last_record_as_most_recent(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test that the last record in the list is used as the most recent."""
+        from src.models import PremiumRecord
+
+        config = _make_config()
+        monitor = Monitor(config)
+
+        mock_store = MagicMock()
+        mock_store.query.return_value = [
+            PremiumRecord(code="513500", premium_rate=1.0, timestamp=datetime(2024, 1, 15, 9, 0, 0)),
+            PremiumRecord(code="513500", premium_rate=2.0, timestamp=datetime(2024, 1, 15, 9, 30, 0)),
+            PremiumRecord(code="513500", premium_rate=3.0, timestamp=datetime(2024, 1, 15, 10, 0, 0)),
+        ]
+        monitor._premium_store = mock_store
+
+        result = monitor._get_trend_info("513500", 3.5)
+
+        assert result is not None
+        # Should compare against the last record (premium_rate=3.0)
+        assert result.previous_rate == 3.0
+        assert result.delta == pytest.approx(0.5)
+        assert result.arrow == "↑"
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_boundary_delta_exactly_001(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test that delta exactly 0.01 produces '↑' arrow.
+
+        Note: uses integer-friendly values to avoid floating point imprecision.
+        previous=2.0, current=2.0+0.01=2.01 in float is slightly less than 0.01,
+        so we use a value that clearly crosses the threshold.
+        """
+        from src.models import PremiumRecord
+
+        config = _make_config()
+        monitor = Monitor(config)
+
+        mock_store = MagicMock()
+        # Use 1.0 and 1.01 which gives exactly 0.01 delta (no float imprecision)
+        mock_store.query.return_value = [
+            PremiumRecord(code="513500", premium_rate=1.0, timestamp=datetime(2024, 1, 15, 9, 0, 0))
+        ]
+        monitor._premium_store = mock_store
+
+        # 1.02 - 1.0 = 0.02 which is clearly >= 0.01
+        result = monitor._get_trend_info("513500", 1.02)
+
+        assert result is not None
+        assert result.arrow == "↑"
+        assert result.delta == pytest.approx(0.02)
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_boundary_delta_exactly_negative_001(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test that delta exactly -0.01 produces '↓' arrow."""
+        from src.models import PremiumRecord
+
+        config = _make_config()
+        monitor = Monitor(config)
+
+        mock_store = MagicMock()
+        mock_store.query.return_value = [
+            PremiumRecord(code="513500", premium_rate=2.0, timestamp=datetime(2024, 1, 15, 9, 0, 0))
+        ]
+        monitor._premium_store = mock_store
+
+        result = monitor._get_trend_info("513500", 1.99)
+
+        assert result is not None
+        assert result.arrow == "↓"
+        assert result.delta == pytest.approx(-0.01)
+
+
+class TestMonitorHasActionableSignal:
+    """Tests for Monitor._has_actionable_signal() method (Task 6.1)."""
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_returns_true_when_buy_signal_present(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test returns True when a result has suggested_buy_min > 0."""
+        config = _make_config()
+        monitor = Monitor(config)
+
+        results = [
+            MonitorResult(
+                code="513500", name="博时标普500ETF", price=1.5, iopv=1.45,
+                premium_rate=2.0, target_amount=100000, bought_amount=30000,
+                remaining_target=70000, suggested_buy_min=5000, suggested_buy_max=10000,
+                suggestion="建议买入", source="AKShare",
+                update_time=datetime(2024, 1, 15, 9, 30, 0), error=None,
+            )
+        ]
+
+        assert monitor._has_actionable_signal(results, [], []) is True
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_returns_true_when_sell_suggestions_present(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test returns True when sell_suggestions is non-empty."""
+        from src.models import SellSuggestion
+
+        config = _make_config()
+        monitor = Monitor(config)
+
+        results = [
+            MonitorResult(
+                code="513500", name="博时标普500ETF", price=1.5, iopv=1.45,
+                premium_rate=2.0, target_amount=100000, bought_amount=30000,
+                remaining_target=70000, suggested_buy_min=0, suggested_buy_max=0,
+                suggestion="观望", source="AKShare",
+                update_time=datetime(2024, 1, 15, 9, 30, 0), error=None,
+            )
+        ]
+        sell_suggestions = [
+            SellSuggestion(code="513500", name="博时标普500ETF",
+                           premium_rate=9.0, sell_percentage=0.3, sell_amount=9000)
+        ]
+
+        assert monitor._has_actionable_signal(results, sell_suggestions, []) is True
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_returns_true_when_discount_alerts_present(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test returns True when discount_alerts is non-empty."""
+        config = _make_config()
+        monitor = Monitor(config)
+
+        results = [
+            MonitorResult(
+                code="513500", name="博时标普500ETF", price=1.4, iopv=1.5,
+                premium_rate=-6.67, target_amount=100000, bought_amount=30000,
+                remaining_target=70000, suggested_buy_min=0, suggested_buy_max=0,
+                suggestion="观望", source="AKShare",
+                update_time=datetime(2024, 1, 15, 9, 30, 0), error=None,
+            )
+        ]
+        discount_alerts = [
+            DiscountAlertResult(code="513500", name="博时标普500ETF",
+                                discount_rate=6.67, price=1.4, iopv=1.5)
+        ]
+
+        assert monitor._has_actionable_signal(results, [], discount_alerts) is True
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_returns_false_when_no_signals(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test returns False when no actionable signals exist."""
+        config = _make_config()
+        monitor = Monitor(config)
+
+        results = [
+            MonitorResult(
+                code="513500", name="博时标普500ETF", price=1.5, iopv=1.45,
+                premium_rate=2.0, target_amount=100000, bought_amount=30000,
+                remaining_target=70000, suggested_buy_min=0, suggested_buy_max=0,
+                suggestion="观望", source="AKShare",
+                update_time=datetime(2024, 1, 15, 9, 30, 0), error=None,
+            )
+        ]
+
+        assert monitor._has_actionable_signal(results, [], []) is False
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_returns_false_when_suggested_buy_min_is_none(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test returns False when suggested_buy_min is None (error case)."""
+        config = _make_config()
+        monitor = Monitor(config)
+
+        results = [
+            MonitorResult(
+                code="513500", name="博时标普500ETF", price=None, iopv=None,
+                premium_rate=None, target_amount=100000, bought_amount=30000,
+                remaining_target=70000, suggested_buy_min=None, suggested_buy_max=None,
+                suggestion=None, source=None,
+                update_time=None, error="数据获取失败",
+            )
+        ]
+
+        assert monitor._has_actionable_signal(results, [], []) is False
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_returns_false_when_all_etfs_have_errors(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test returns False when all ETFs have errors (validates Req 1.5)."""
+        config = _make_config()
+        monitor = Monitor(config)
+
+        results = [
+            MonitorResult(
+                code="513500", name="博时标普500ETF", price=None, iopv=None,
+                premium_rate=None, target_amount=100000, bought_amount=30000,
+                remaining_target=70000, suggested_buy_min=None, suggested_buy_max=None,
+                suggestion=None, source=None,
+                update_time=None, error="数据获取失败",
+            ),
+            MonitorResult(
+                code="159501", name="嘉实纳斯达克100ETF", price=None, iopv=None,
+                premium_rate=None, target_amount=80000, bought_amount=20000,
+                remaining_target=60000, suggested_buy_min=None, suggested_buy_max=None,
+                suggestion=None, source=None,
+                update_time=None, error="所有数据源均失败",
+            ),
+        ]
+
+        assert monitor._has_actionable_signal(results, [], []) is False
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_returns_false_with_empty_results(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test returns False when results list is empty."""
+        config = _make_config()
+        monitor = Monitor(config)
+
+        assert monitor._has_actionable_signal([], [], []) is False
+
+
+class TestMonitorQuietModeInit:
+    """Tests for Monitor.__init__ quiet_mode parameter (Task 6.1)."""
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_quiet_mode_defaults_to_true(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test that quiet_mode defaults to True when not specified."""
+        config = _make_config()
+        monitor = Monitor(config)
+
+        assert monitor._quiet_mode is True
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_quiet_mode_can_be_disabled(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test that quiet_mode can be explicitly set to False."""
+        config = _make_config()
+        monitor = Monitor(config, quiet_mode=False)
+
+        assert monitor._quiet_mode is False
+
+    @patch("src.monitor.DataSourceManager")
+    @patch("src.monitor.AKShareSource")
+    @patch("src.monitor.HaoETFSource")
+    def test_quiet_mode_true_explicit(self, mock_haoetf, mock_akshare, mock_dsm_cls):
+        """Test that quiet_mode can be explicitly set to True."""
+        config = _make_config()
+        monitor = Monitor(config, quiet_mode=True)
+
+        assert monitor._quiet_mode is True
