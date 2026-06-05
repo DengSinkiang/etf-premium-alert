@@ -4,9 +4,12 @@ Provides a Flask-based HTTP interface for triggering the monitoring workflow
 via Cloudflare Worker or other HTTP clients.
 """
 
+import json
 import logging
+import os
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import requests as http_requests
@@ -91,7 +94,7 @@ def trigger() -> tuple[Any, int]:
 
     try:
         config = load_config()
-        monitor = Monitor(config)
+        monitor = Monitor(config, quiet_mode=False)
         results: list[MonitorResult] = monitor.run()
 
         serialized = [_serialize_result(r) for r in results]
@@ -142,6 +145,112 @@ def summary() -> tuple[Any, int]:
     except Exception as e:
         logger.error("生成每日摘要时发生异常: %s", e)
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/data/backup", methods=["GET"])
+def data_backup() -> tuple[Any, int]:
+    """Return all data files as a JSON payload for KV persistence.
+
+    Response format:
+    {
+        "positions": <contents of positions.json or null>,
+        "premium_513500": <contents of 513500.json or null>,
+        ...
+    }
+
+    Returns HTTP 200 with the backup payload. Files that cannot be read
+    are represented as null.
+    """
+    try:
+        config = load_config()
+    except SystemExit:
+        return jsonify({"status": "error", "message": "配置加载失败"}), 500
+
+    data_dir = Path(config.data_dir)
+    payload: dict[str, Any] = {}
+
+    # Read positions.json
+    positions_path = data_dir / "positions.json"
+    try:
+        with open(positions_path, "r", encoding="utf-8") as f:
+            payload["positions"] = json.load(f)
+    except (IOError, OSError, json.JSONDecodeError):
+        payload["positions"] = None
+
+    # Read each ETF premium file
+    for etf in config.etfs:
+        key = f"premium_{etf.code}"
+        file_path = data_dir / f"{etf.code}.json"
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                payload[key] = json.load(f)
+        except (IOError, OSError, json.JSONDecodeError):
+            payload[key] = None
+
+    return jsonify(payload), 200
+
+
+@app.route("/data/restore", methods=["POST"])
+def data_restore() -> tuple[Any, int]:
+    """Accept KV data and write to local files.
+
+    Request body:
+    {
+        "positions": <JSON object or null>,
+        "premium_513500": <JSON object or null>,
+        ...
+    }
+
+    Writes non-null values to corresponding files using atomic writes.
+    Returns 200 {"status": "success"} on completion.
+    Returns 400 if the request body is not valid JSON.
+    """
+    data = request.get_json(force=True, silent=True)
+    if data is None or not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "请求体必须为有效JSON"}), 400
+
+    try:
+        config = load_config()
+    except SystemExit:
+        return jsonify({"status": "error", "message": "配置加载失败"}), 500
+
+    data_dir = Path(config.data_dir)
+    os.makedirs(data_dir, exist_ok=True)
+
+    # Write positions.json if non-null
+    positions_value = data.get("positions")
+    if positions_value is not None:
+        _atomic_write_json(data_dir / "positions.json", positions_value)
+
+    # Write premium_{code}.json files if non-null
+    for key, value in data.items():
+        if key.startswith("premium_") and value is not None:
+            code = key[len("premium_"):]
+            _atomic_write_json(data_dir / f"{code}.json", value)
+
+    return jsonify({"status": "success"}), 200
+
+
+def _atomic_write_json(file_path: Path, content: Any) -> None:
+    """Write JSON content to a file atomically using temp file + os.replace.
+
+    Args:
+        file_path: Target file path.
+        content: JSON-serializable content to write.
+    """
+    temp_path = file_path.with_suffix(".json.tmp")
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(content, f, ensure_ascii=False, indent=2)
+        os.replace(str(temp_path), str(file_path))
+    except (IOError, OSError):
+        # Clean up temp file on failure
+        try:
+            if temp_path.exists():
+                os.remove(temp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _validate_record_input(

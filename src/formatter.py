@@ -213,7 +213,12 @@ def format_telegram_markdown(results: list[MonitorResult]) -> str:
             lines.append(f"*\\[{escaped_code}\\] {escaped_name}*")
             lines.append(f"`当前价格:` {_escape_telegram_markdown(str(result.price))}")
             lines.append(f"`估算净值:` {_escape_telegram_markdown(str(result.iopv))}")
-            lines.append(f"`当前溢价率:` {_escape_telegram_markdown(str(result.premium_rate))}%")
+            # 溢价率 + 趋势指标
+            trend_str = format_trend_indicator(result.trend_info)
+            if trend_str:
+                lines.append(f"`当前溢价率:` {_escape_telegram_markdown(str(result.premium_rate))}% {_escape_telegram_markdown(trend_str)}")
+            else:
+                lines.append(f"`当前溢价率:` {_escape_telegram_markdown(str(result.premium_rate))}%")
             lines.append(f"`目标仓位:` {_escape_telegram_markdown(str(result.target_amount))} 元")
             lines.append(f"`已买金额:` {_escape_telegram_markdown(str(result.bought_amount))} 元")
             lines.append(f"`剩余目标:` {_escape_telegram_markdown(str(result.remaining_target))} 元")
