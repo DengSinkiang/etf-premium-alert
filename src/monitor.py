@@ -23,6 +23,7 @@ from src.premium_calculator import (
     get_suggestion_text,
 )
 from src.premium_store import PremiumStore
+from src.status_store import StatusStore
 from src.strategy_engine import StrategyEngine
 
 logger = logging.getLogger("monitor")
@@ -61,6 +62,7 @@ class Monitor:
         self._discount_alert = DiscountAlert(config)
         self._premium_store = PremiumStore(data_dir=config.data_dir)
         self._position_store = PositionStore(data_dir=config.data_dir)
+        self._status_store = StatusStore(data_dir=config.data_dir)
         self._strategy = StrategyEngine(config, self._premium_store)
         self._cycle_discount_alerts: list[DiscountAlertResult] = []
 
@@ -87,6 +89,25 @@ class Monitor:
         self._cycle_discount_alerts: list[DiscountAlertResult] = []
 
         results: list[MonitorResult] = self._process_etfs_parallel()
+
+        # Track status and consecutive failures
+        self._update_status(results)
+
+        # Check for newly full positions and alert
+        for result in results:
+            if result.error is None and result.remaining_target == 0 and result.target_amount > 0:
+                # Only alert if we haven't already (check status store)
+                status = self._status_store.get_status()
+                etf_st = status.get("etf_status", {}).get(result.code, {})
+                if not etf_st.get("full_position_alerted", False):
+                    self._send_full_position_alert(result.code, result.name, result.bought_amount, result.target_amount)
+                    # Mark as alerted in status
+                    etf_st["full_position_alerted"] = True
+                    status.setdefault("etf_status", {})[result.code] = etf_st
+                    self._status_store._write(status)
+
+        # Annotate group comparisons inline
+        self._annotate_group_comparisons(results)
 
         # Build trend_map from results
         trend_map = {r.code: r.trend_info for r in results if r.trend_info is not None}
@@ -318,6 +339,9 @@ class Monitor:
         # 2.5 获取趋势信息
         trend_info = self._get_trend_info(code, premium_rate)
 
+        # 2.6 计算溢价率分位（近30天）
+        percentile = self._get_percentile(code, premium_rate)
+
         # 3. 计算建议买入金额（使用动态调整后的阈值）
         adjusted_rules = self._strategy.get_adjusted_rules(etf_config, premium_rate)
         suggested_buy_min, suggested_buy_max = calculate_suggested_buy(
@@ -326,8 +350,25 @@ class Monitor:
             rules=adjusted_rules,
         )
 
-        # 4. 获取操作建议文字
-        suggestion = get_suggestion_text(premium_rate)
+        # 4. 获取操作建议文字（基于动态规则匹配结果 + 分位描述）
+        if suggested_buy_min > 0:
+            if suggested_buy_min >= remaining_target * 0.5:
+                suggestion = "可以买入"
+            else:
+                suggestion = "可以分批买"
+        else:
+            suggestion = get_suggestion_text(premium_rate)
+
+        # 附加溢价率环境描述
+        if percentile is not None:
+            if percentile >= 75:
+                suggestion += f"（历史{percentile}%分位，偏高）"
+            elif percentile >= 50:
+                suggestion += f"（历史{percentile}%分位，中等）"
+            elif percentile >= 25:
+                suggestion += f"（历史{percentile}%分位，偏低）"
+            else:
+                suggestion += f"（历史{percentile}%分位，低位）"
 
         # 5. 折价检测：触发时通过 Notifier 推送 Telegram 消息
         discount_result = self._discount_alert.check(
@@ -376,6 +417,7 @@ class Monitor:
             volume=volume,
             turnover_rate=turnover_rate,
             trend_info=trend_info,
+            percentile=percentile,
         )
 
     def _compute_effective_bought_amount(self, etf_config: ETFConfig) -> float:
@@ -404,6 +446,102 @@ class Monitor:
                 e,
             )
             return etf_config.bought_amount
+
+    def _send_full_position_alert(self, code: str, name: str, bought: float, target: float) -> None:
+        """发送仓位满仓提醒。仅在 Telegram 启用时发送。
+
+        Args:
+            code: ETF 代码
+            name: ETF 名称
+            bought: 实际持仓金额
+            target: 目标仓位金额
+        """
+        if not self._config.telegram.enabled:
+            return
+
+        message = f"🎉 {name}（{code}）目标仓位已满\n持仓: {bought} 元 / 目标: {target} 元\n后续将只关注卖出信号"
+        try:
+            self._notifier.send(message)
+            logger.info("[%s] 满仓提醒已推送", code)
+        except Exception as e:
+            logger.error("[%s] 满仓提醒推送失败: %s", code, e)
+
+    def _get_percentile(self, code: str, current_premium: float) -> int | None:
+        """Calculate the percentile rank of current premium in 30-day history.
+
+        Returns None if fewer than 5 historical records exist.
+        """
+        try:
+            records = self._premium_store.query(code, lookback_days=30)
+        except StoreError:
+            return None
+
+        if len(records) < 5:
+            return None
+
+        historical = [r.premium_rate for r in records]
+        count_below = sum(1 for h in historical if h < current_premium)
+        percentile = int(count_below / len(historical) * 100)
+        return percentile
+
+    def _annotate_group_comparisons(self, results: list[MonitorResult]) -> None:
+        """Annotate each result with group comparison text.
+
+        For each group, find the ETF with lowest premium rate and annotate:
+        - Lowest: "✅本组最优"
+        - Others: "比最优高 +X.XXpp"
+        """
+        # Build groups: group_name -> list of results with valid premium
+        groups: dict[str, list[MonitorResult]] = {}
+        for r in results:
+            if r.premium_rate is None:
+                continue
+            # Find group from config
+            etf_config = next(
+                (etf for etf in self._config.etfs if etf.code == r.code), None
+            )
+            if etf_config is None or etf_config.group is None:
+                continue
+            groups.setdefault(etf_config.group, []).append(r)
+
+        # Annotate each group
+        for group_results in groups.values():
+            if len(group_results) < 2:
+                continue
+
+            # Find minimum premium in group
+            min_premium = min(r.premium_rate for r in group_results)
+
+            for r in group_results:
+                if r.premium_rate == min_premium:
+                    r.group_comparison = "✅本组最优"
+                else:
+                    diff = r.premium_rate - min_premium
+                    r.group_comparison = f"比最优高 +{diff:.2f}pp"
+
+    def _update_status(self, results: list[MonitorResult]) -> None:
+        """Update status tracking and send alert on consecutive failures.
+
+        Records success/failure per ETF. If any ETF has 3+ consecutive
+        failures, sends a one-time Telegram alert.
+        """
+        _FAILURE_THRESHOLD = 3
+
+        for result in results:
+            try:
+                if result.error is None:
+                    self._status_store.record_success(result.code)
+                else:
+                    count = self._status_store.record_failure(result.code)
+                    if count == _FAILURE_THRESHOLD and self._config.telegram.enabled:
+                        self._notifier.send(
+                            f"⚠️ 数据源持续异常\n\n"
+                            f"ETF: {result.name}（{result.code}）\n"
+                            f"已连续 {count} 次获取失败\n"
+                            f"最近错误: {result.error}"
+                        )
+            except Exception as e:
+                logger.warning("[%s] 状态记录失败: %s", result.code, e)
 
     def _get_trend_info(self, code: str, current_premium: float) -> TrendInfo | None:
         """Compare current premium against most recent PremiumStore record.

@@ -177,7 +177,9 @@ def _escape_telegram_markdown(text: str) -> str:
 
 
 def format_telegram_markdown(results: list[MonitorResult]) -> str:
-    """生成 Telegram MarkdownV2 格式消息。
+    """生成 Telegram MarkdownV2 格式消息（美化版）。
+
+    使用 emoji 分隔区块，bold 高亮关键数字，让手机上一眼抓到重点。
 
     Args:
         results: MonitorResult 列表
@@ -187,52 +189,74 @@ def format_telegram_markdown(results: list[MonitorResult]) -> str:
     """
     lines: list[str] = []
 
-    # Header with timestamp
-    header_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    lines.append(f"*QDII ETF 溢价率监控*")
-    lines.append(f"`{_escape_telegram_markdown(header_time)}`")
+    # Header
+    header_time = datetime.now().strftime("%H:%M")
+    lines.append(f"📊 *QDII ETF 溢价率监控* `{_escape_telegram_markdown(header_time)}`")
     lines.append("")
 
     for i, result in enumerate(results):
         if i > 0:
-            lines.append("\\-\\-\\-")
             lines.append("")
 
         if result.error is not None:
-            # Error case
-            escaped_code = _escape_telegram_markdown(result.code)
+            # Error case — compact
             escaped_name = _escape_telegram_markdown(result.name)
             escaped_error = _escape_telegram_markdown(result.error)
-            lines.append(f"*\\[{escaped_code}\\] {escaped_name}*")
-            lines.append(f"❌ 错误: {escaped_error}")
-            lines.append("")
+            lines.append(f"❌ *{escaped_name}*")
+            lines.append(f"   {escaped_error}")
         else:
-            # Normal case with all fields
-            escaped_code = _escape_telegram_markdown(result.code)
+            # Normal case — emoji-structured, key numbers bold
             escaped_name = _escape_telegram_markdown(result.name)
-            lines.append(f"*\\[{escaped_code}\\] {escaped_name}*")
-            lines.append(f"`当前价格:` {_escape_telegram_markdown(str(result.price))}")
-            lines.append(f"`估算净值:` {_escape_telegram_markdown(str(result.iopv))}")
-            # 溢价率 + 趋势指标
+            premium_str = _escape_telegram_markdown(f"{result.premium_rate:.2f}")
+
+            # Trend indicator
             trend_str = format_trend_indicator(result.trend_info)
-            if trend_str:
-                lines.append(f"`当前溢价率:` {_escape_telegram_markdown(str(result.premium_rate))}% {_escape_telegram_markdown(trend_str)}")
+            trend_part = f" {_escape_telegram_markdown(trend_str)}" if trend_str else ""
+
+            # Suggestion emoji
+            suggestion_base = result.suggestion.split("（")[0] if result.suggestion else ""
+            if "可以买入" in suggestion_base:
+                suggestion_emoji = "🟢"
+            elif "可以分批买" in suggestion_base:
+                suggestion_emoji = "🟡"
             else:
-                lines.append(f"`当前溢价率:` {_escape_telegram_markdown(str(result.premium_rate))}%")
-            lines.append(f"`目标仓位:` {_escape_telegram_markdown(str(result.target_amount))} 元")
-            lines.append(f"`已买金额:` {_escape_telegram_markdown(str(result.bought_amount))} 元")
-            lines.append(f"`剩余目标:` {_escape_telegram_markdown(str(result.remaining_target))} 元")
-            lines.append(
-                f"`建议买入:` {_escape_telegram_markdown(str(result.suggested_buy_min))} "
-                f"\\~ {_escape_telegram_markdown(str(result.suggested_buy_max))} 元"
-            )
-            lines.append(f"`操作建议:` {_escape_telegram_markdown(str(result.suggestion))}")
-            lines.append(f"`数据来源:` {_escape_telegram_markdown(str(result.source))}")
-            lines.append(f"`更新时间:` {_escape_telegram_markdown(_format_update_time(result.update_time))}")
-            # 成交量/换手率展示（仅高溢价时有值）
+                suggestion_emoji = "🔴"
+
+            # Line 1: ETF name + premium (bold) + trend
+            lines.append(f"{suggestion_emoji} *{escaped_name}*")
+            lines.append(f"   溢价率 *{premium_str}%*{trend_part}")
+
+            # Percentile + group comparison (inline context)
+            context_parts = []
+            if result.percentile is not None:
+                context_parts.append(f"分位{result.percentile}%")
+            if result.group_comparison is not None:
+                context_parts.append(result.group_comparison)
+            if context_parts:
+                context_text = _escape_telegram_markdown(" | ".join(context_parts))
+                lines.append(f"   {context_text}")
+
+            # Line 2: Price / IOPV
+            escaped_price = _escape_telegram_markdown(str(result.price))
+            escaped_iopv = _escape_telegram_markdown(str(result.iopv))
+            lines.append(f"   💰 {escaped_price} / {escaped_iopv}")
+
+            # Line 3: Buy suggestion with lots (key info bold)
+            if result.suggested_buy_min is not None and result.suggested_buy_max is not None:
+                lot_text = format_buy_suggestion_with_lots(
+                    result.suggested_buy_min, result.suggested_buy_max, result.price
+                )
+                escaped_lot = _escape_telegram_markdown(lot_text)
+                lines.append(f"   🛒 {escaped_lot}")
+
+            # Line 4: Position progress
+            escaped_bought = _escape_telegram_markdown(str(int(result.bought_amount)))
+            escaped_target = _escape_telegram_markdown(str(int(result.target_amount)))
+            lines.append(f"   📈 仓位 {escaped_bought}/{escaped_target} 元")
+
+            # Volume/turnover (only when high premium)
             if result.volume is not None or result.turnover_rate is not None:
-                lines.append(_format_volume_info_telegram(result.volume, result.turnover_rate))
-            lines.append("")
+                lines.append(f"   {_format_volume_info_telegram(result.volume, result.turnover_rate)}")
 
     return "\n".join(lines)
 

@@ -347,9 +347,24 @@ def telegram_webhook() -> tuple[Any, int]:
     if not text or not chat_id:
         return jsonify({"ok": True}), 200
 
+    text = text.strip()
+
+    # Handle /undo command
+    if text == "/undo":
+        return _handle_undo(chat_id)
+
+    # Handle /history CODE command
+    history_match = re.match(r"^/history\s+(\S+)$", text)
+    if history_match:
+        return _handle_history(chat_id, history_match.group(1))
+
+    # Handle /status command
+    if text == "/status":
+        return _handle_status(chat_id)
+
     # Match /buy CODE AMOUNT or /sell CODE AMOUNT
     pattern = r"^/(buy|sell)\s+(\S+)\s+(\S+)$"
-    match = re.match(pattern, text.strip())
+    match = re.match(pattern, text)
     if not match:
         return jsonify({"ok": True}), 200
 
@@ -388,6 +403,139 @@ def telegram_webhook() -> tuple[Any, int]:
         return jsonify({"ok": True}), 200
 
     _send_telegram_reply(chat_id, f"✅ 已记录: {code} {type_label} {amount_val} 元")
+    return jsonify({"ok": True}), 200
+
+
+def _handle_undo(chat_id: int | str) -> tuple[Any, int]:
+    """Handle /undo command — remove the most recent transaction."""
+    try:
+        config = load_config()
+    except SystemExit:
+        _send_telegram_reply(chat_id, "❌ 配置加载失败")
+        return jsonify({"ok": True}), 200
+
+    try:
+        store = PositionStore(data_dir=config.data_dir)
+        removed = store.undo_last()
+    except StoreError:
+        _send_telegram_reply(chat_id, "❌ 撤销失败: 存储读写错误")
+        return jsonify({"ok": True}), 200
+
+    if removed is None:
+        _send_telegram_reply(chat_id, "❌ 没有可撤销的交易记录")
+    else:
+        type_label = "买入" if removed.type == "buy" else "卖出"
+        _send_telegram_reply(
+            chat_id,
+            f"↩️ 已撤销: {removed.code} {type_label} {removed.amount} 元 ({removed.timestamp})"
+        )
+
+    return jsonify({"ok": True}), 200
+
+
+def _handle_history(chat_id: int | str, code: str) -> tuple[Any, int]:
+    """Handle /history CODE command — show transaction history and position summary."""
+    try:
+        config = load_config()
+    except SystemExit:
+        _send_telegram_reply(chat_id, "❌ 配置加载失败")
+        return jsonify({"ok": True}), 200
+
+    valid_codes = {etf.code for etf in config.etfs}
+    if code not in valid_codes:
+        _send_telegram_reply(chat_id, f"❌ ETF代码 {code} 不在配置中")
+        return jsonify({"ok": True}), 200
+
+    try:
+        store = PositionStore(data_dir=config.data_dir)
+        transactions = store.get_transactions(code)
+
+        # Find the ETF config for base bought_amount and target
+        etf_config = next(etf for etf in config.etfs if etf.code == code)
+        effective = store.compute_effective_amount(code, etf_config.bought_amount)
+    except StoreError:
+        _send_telegram_reply(chat_id, "❌ 读取记录失败")
+        return jsonify({"ok": True}), 200
+
+    if not transactions:
+        _send_telegram_reply(
+            chat_id,
+            f"📋 {code} 交易记录\n\n无交易记录\n\n"
+            f"配置初始仓位: {etf_config.bought_amount} 元\n"
+            f"目标仓位: {etf_config.target_amount} 元"
+        )
+    else:
+        lines = [f"📋 {code} 交易记录\n"]
+        for t in transactions[-10:]:  # Show last 10
+            icon = "🟢" if t.type == "buy" else "🔴"
+            type_label = "买入" if t.type == "buy" else "卖出"
+            lines.append(f"{icon} {type_label} {t.amount} 元 ({t.timestamp[:10]})")
+
+        if len(transactions) > 10:
+            lines.append(f"... 共 {len(transactions)} 条记录")
+
+        lines.append("")
+        lines.append(f"配置初始仓位: {etf_config.bought_amount} 元")
+        lines.append(f"实际持仓: {effective} 元")
+        lines.append(f"目标仓位: {etf_config.target_amount} 元")
+        remaining = max(0.0, etf_config.target_amount - effective)
+        lines.append(f"剩余目标: {remaining} 元")
+
+        if effective >= etf_config.target_amount:
+            lines.append("\n🎉 目标仓位已满!")
+
+        _send_telegram_reply(chat_id, "\n".join(lines))
+
+    return jsonify({"ok": True}), 200
+
+
+def _handle_status(chat_id: int | str) -> tuple[Any, int]:
+    """Handle /status command — show system health summary."""
+    try:
+        config = load_config()
+    except SystemExit:
+        _send_telegram_reply(chat_id, "❌ 配置加载失败")
+        return jsonify({"ok": True}), 200
+
+    from src.status_store import StatusStore
+    from src.premium_store import PremiumStore
+
+    status_store = StatusStore(data_dir=config.data_dir)
+    premium_store = PremiumStore(data_dir=config.data_dir)
+    status = status_store.get_status()
+
+    lines = ["📡 系统状态\n"]
+
+    # Last successful monitoring time
+    last_success = status.get("last_success_time", "无记录")
+    lines.append(f"⏱ 最近成功监控: {last_success}")
+    lines.append("")
+
+    # Per-ETF status
+    etf_status = status.get("etf_status", {})
+    for etf in config.etfs:
+        etf_info = etf_status.get(etf.code, {})
+        failures = etf_info.get("consecutive_failures", 0)
+        last = etf_info.get("last_success", "无")
+
+        if failures == 0:
+            icon = "✅"
+        elif failures < 3:
+            icon = "⚠️"
+        else:
+            icon = "❌"
+
+        # Count premium records
+        try:
+            records = premium_store.query(etf.code, lookback_days=30)
+            record_count = len(records)
+        except Exception:
+            record_count = 0
+
+        lines.append(f"{icon} {etf.name}")
+        lines.append(f"   记录数: {record_count} | 连续失败: {failures}")
+
+    _send_telegram_reply(chat_id, "\n".join(lines))
     return jsonify({"ok": True}), 200
 
 

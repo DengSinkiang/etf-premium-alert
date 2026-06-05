@@ -84,6 +84,28 @@ class PositionStore:
             if t.get("code") == code
         ]
 
+    def undo_last(self) -> Transaction | None:
+        """Remove and return the most recent transaction.
+
+        Returns None if no transactions exist.
+
+        Raises:
+            StoreError: On filesystem read or write failure.
+        """
+        transactions = self._read_transactions()
+        if not transactions:
+            return None
+
+        removed = transactions.pop()
+        self._write_transactions(transactions)
+
+        return Transaction(
+            code=removed["code"],
+            type=removed["type"],
+            amount=removed["amount"],
+            timestamp=removed["timestamp"],
+        )
+
     def compute_effective_amount(self, code: str, base_amount: float) -> float:
         """Compute effective bought amount from base + buys - sells, clamped to >= 0.
 

@@ -109,50 +109,45 @@ class TestFormatTelegramMarkdown:
         result = _make_normal_result()
         output = format_telegram_markdown([result])
 
-        assert "513500" in output
         assert "博时标普500ETF" in output
-        assert "1.234" in output or "1\\.234" in output
         assert "2.83" in output or "2\\.83" in output
-        assert "100000" in output
+        assert "1.234" in output or "1\\.234" in output
+        assert "1.200" in output or "1\\.200" in output or "1\\.2" in output
         assert "30000" in output
-        assert "70000" in output
-        assert "21000" in output
-        assert "35000" in output
-        assert "可以分批买" in output
-        assert "AKShare" in output
-        assert "2024" in output
-        assert "09:30:00" in output or "09\\:30\\:00" in output
+        assert "100000" in output
 
     def test_uses_markdown_bold(self):
         result = _make_normal_result()
         output = format_telegram_markdown([result])
-        # Header should be bold
-        assert "*QDII ETF 溢价率监控*" in output
+        # ETF name should be bold
+        assert "*博时标普500ETF*" in output
 
-    def test_uses_monospace(self):
+    def test_uses_emoji_indicators(self):
         result = _make_normal_result()
         output = format_telegram_markdown([result])
-        # Field labels should use monospace
-        assert "`当前价格:`" in output
-        assert "`估算净值:`" in output
+        # Should have emoji indicators
+        assert "📊" in output
+        assert "💰" in output
+        assert "🛒" in output or "📈" in output
 
     def test_error_result_shows_error_message(self):
         result = _make_error_result()
         output = format_telegram_markdown([result])
 
-        assert "159501" in output
         assert "嘉实纳斯达克100ETF" in output
         assert "数据源获取失败" in output
+        assert "❌" in output
 
-    def test_multiple_results_have_dividers(self):
+    def test_multiple_results_separated(self):
         results = [_make_normal_result(), _make_error_result()]
         output = format_telegram_markdown(results)
 
-        assert "\\-\\-\\-" in output
+        assert "博时标普500ETF" in output
+        assert "嘉实纳斯达克100ETF" in output
 
-    def test_header_is_bold(self):
+    def test_header_contains_title(self):
         output = format_telegram_markdown([_make_normal_result()])
-        assert output.startswith("*QDII ETF 溢价率监控*")
+        assert "QDII ETF 溢价率监控" in output
 
 
 class TestFormatDiscountAlertPlain:

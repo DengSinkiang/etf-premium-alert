@@ -102,6 +102,8 @@ class MonitorResult:
     volume: float | None = None  # 成交量（手），仅高溢价时有值
     turnover_rate: float | None = None  # 换手率（%），仅高溢价时有值
     trend_info: TrendInfo | None = None  # 溢价率趋势信息
+    percentile: int | None = None  # 近30天溢价率分位 (0-100)
+    group_comparison: str | None = None  # 同组对比标注，如 "✅本组最优" 或 "比最优高 +1.2pp"
 
 
 @dataclass

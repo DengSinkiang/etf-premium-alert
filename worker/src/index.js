@@ -107,10 +107,16 @@ export default {
       }
     }
 
-    // Existing: proxy to /trigger (manual test)
+    // Existing: proxy to /trigger (manual test) with backup
     try {
-      const response = await fetch(`${apiUrl}/trigger`);
+      const response = await fetch(`${apiUrl}/trigger?force=true`);
       const data = await response.json();
+
+      // Backup to KV after successful trigger
+      if (data.status === "success") {
+        await backupToKV(env, apiUrl);
+      }
+
       return new Response(JSON.stringify(data, null, 2), {
         headers: { "Content-Type": "application/json" },
       });
