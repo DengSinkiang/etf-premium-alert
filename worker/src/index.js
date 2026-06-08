@@ -19,6 +19,13 @@ export default {
   async scheduled(event, env, ctx) {
     const apiUrl = env.API_URL || "https://etf-premium-alert.onrender.com";
 
+    // 0. Pre-warm: wake up Render instance from cold sleep
+    try {
+      await fetch(`${apiUrl}/health`, { method: "GET" });
+    } catch (e) {
+      // Ignore — just a wake-up call
+    }
+
     // 1. Restore from KV before trigger
     await restoreFromKV(env, apiUrl);
 

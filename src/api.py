@@ -349,6 +349,10 @@ def telegram_webhook() -> tuple[Any, int]:
 
     text = text.strip()
 
+    # Handle /help command
+    if text == "/help":
+        return _handle_help(chat_id)
+
     # Handle /undo command
     if text == "/undo":
         return _handle_undo(chat_id)
@@ -398,11 +402,51 @@ def telegram_webhook() -> tuple[Any, int]:
     try:
         store = PositionStore(data_dir=config.data_dir)
         store.append(code, txn_type, amount_val)
+
+        # Compute updated position for confirmation message
+        try:
+            etf_config = next(etf for etf in config.etfs if etf.code == code)
+            effective_after = store.compute_effective_amount(code, etf_config.bought_amount)
+            if txn_type == "buy":
+                effective_before = effective_after - amount_val
+            else:
+                effective_before = effective_after + amount_val
+            remaining = max(0.0, float(etf_config.target_amount) - effective_after)
+
+            reply = (
+                f"✅ 已记录: {code} {type_label} {amount_val} 元\n"
+                f"持仓: {effective_before:.0f} → {effective_after:.0f} 元\n"
+                f"剩余目标: {remaining:.0f} 元"
+            )
+            if remaining == 0:
+                reply += "\n🎉 目标仓位已满!"
+        except Exception:
+            reply = f"✅ 已记录: {code} {type_label} {amount_val} 元"
+
     except StoreError:
         _send_telegram_reply(chat_id, "❌ 记录失败: 存储写入错误")
         return jsonify({"ok": True}), 200
 
-    _send_telegram_reply(chat_id, f"✅ 已记录: {code} {type_label} {amount_val} 元")
+    _send_telegram_reply(chat_id, reply)
+    return jsonify({"ok": True}), 200
+
+
+def _handle_help(chat_id: int | str) -> tuple[Any, int]:
+    """Handle /help command — show all available bot commands."""
+    help_text = (
+        "📖 可用命令\n\n"
+        "/buy CODE AMOUNT — 记录买入\n"
+        "/sell CODE AMOUNT — 记录卖出\n"
+        "/undo — 撤销最近一笔交易\n"
+        "/history CODE — 查看交易记录和持仓\n"
+        "/status — 查看系统运行状态\n"
+        "/help — 显示此帮助\n\n"
+        "示例:\n"
+        "/buy 513500 5000\n"
+        "/sell 513650 3000\n"
+        "/history 513500"
+    )
+    _send_telegram_reply(chat_id, help_text)
     return jsonify({"ok": True}), 200
 
 
