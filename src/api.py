@@ -217,16 +217,20 @@ def data_restore() -> tuple[Any, int]:
     data_dir = Path(config.data_dir)
     os.makedirs(data_dir, exist_ok=True)
 
-    # Write positions.json if non-null
+    # Write positions.json ONLY if the file doesn't already exist on disk
+    # (prevents KV restore from overwriting newer local transactions)
     positions_value = data.get("positions")
-    if positions_value is not None:
-        _atomic_write_json(data_dir / "positions.json", positions_value)
+    positions_path = data_dir / "positions.json"
+    if positions_value is not None and not positions_path.exists():
+        _atomic_write_json(positions_path, positions_value)
 
-    # Write premium_{code}.json files if non-null
+    # Write premium_{code}.json files ONLY if they don't already exist
     for key, value in data.items():
         if key.startswith("premium_") and value is not None:
             code = key[len("premium_"):]
-            _atomic_write_json(data_dir / f"{code}.json", value)
+            file_path = data_dir / f"{code}.json"
+            if not file_path.exists():
+                _atomic_write_json(file_path, value)
 
     return jsonify({"status": "success"}), 200
 

@@ -189,8 +189,10 @@ def format_telegram_markdown(results: list[MonitorResult]) -> str:
     """
     lines: list[str] = []
 
-    # Header
-    header_time = datetime.now().strftime("%H:%M")
+    # Header (Beijing time UTC+8)
+    from datetime import timezone, timedelta
+    beijing_tz = timezone(timedelta(hours=8))
+    header_time = datetime.now(beijing_tz).strftime("%H:%M")
     lines.append(f"📊 *QDII ETF 溢价率监控* `{_escape_telegram_markdown(header_time)}`")
     lines.append("")
 
