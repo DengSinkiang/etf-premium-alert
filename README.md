@@ -33,6 +33,9 @@ etfs:
     name: "博时标普500ETF"         # ETF 名称
     target_amount: 100000         # 目标仓位金额（元）
     bought_amount: 30000          # 已买入金额（元）
+    sell_threshold: 8.0           # 满仓后卖出提醒阈值（%）
+    group: "sp500"                # 可选，同类 ETF 对比分组
+    discount_threshold: 1.0       # 折价提醒阈值（%）
     premium_rules:                # 溢价率买入规则（按溢价率从低到高排列）
       - max_premium: 1.0          # 溢价率 ≤ 1%
         min_ratio: 0.6            # 建议买入 剩余目标 × 60%
@@ -66,6 +69,9 @@ telegram:
   chat_id: "YOUR_CHAT_ID"        # 接收消息的 Chat ID
 
 alert_threshold: 3.0              # 溢价率提醒阈值（%）
+lookback_days: 7                  # 动态阈值历史窗口（天）
+data_dir: "data"                  # 运行数据目录
+summary_time: "15:30"             # 每日摘要时间（北京时间）
 ```
 
 ## 运行方式
@@ -80,6 +86,14 @@ python -m src.main --once
 
 ```bash
 python -m src.main --config /path/to/config.yaml
+```
+
+### 其他命令行选项
+
+```bash
+python -m src.main --force      # 跳过交易日判断，强制运行
+python -m src.main --summary    # 生成并推送每日摘要
+python -m src.main --no-quiet   # 禁用安静模式，推送所有结果
 ```
 
 ### 快捷入口
@@ -99,7 +113,28 @@ python -m flask --app src.api run --host 0.0.0.0 --port 5000
 API 端点：
 
 - `GET /trigger` — 触发监控，返回 JSON 格式结果
+- `GET /summary` — 生成每日摘要并按配置推送 Telegram
 - `GET /health` — 健康检查
+- `POST /record` — 记录买入/卖出交易，JSON: `{"code":"513500","type":"buy","amount":5000}`
+- `POST /telegram/webhook` — Telegram Bot webhook，支持 `/buy`、`/sell`、`/undo`、`/history CODE`、`/status`、`/help`
+- `GET /data/backup` — 导出运行数据，供 Worker KV 备份
+- `POST /data/restore` — 从 Worker KV 恢复运行数据
+
+如果设置环境变量 `ETF_API_SECRET`（或 `API_SECRET`），除 `/health` 和 `/telegram/webhook` 外的 API 请求需要携带：
+
+```http
+X-API-Key: <secret>
+```
+
+或：
+
+```http
+Authorization: Bearer <secret>
+```
+
+如果设置 `TELEGRAM_WEBHOOK_SECRET`，`/telegram/webhook` 只接受带有匹配
+`X-Telegram-Bot-Api-Secret-Token` 头的请求。该值应与 Telegram `setWebhook`
+时传入的 `secret_token` 一致。
 
 ### Docker 方式（可选）
 
@@ -141,7 +176,12 @@ CMD ["python", "-m", "flask", "--app", "src.api", "run", "--host", "0.0.0.0", "-
 通过 Cloudflare Worker 定时触发 HTTP API：
 
 1. **部署 Flask API** — 在服务器上以 HTTP API 模式运行本工具（见上方运行方式）
-2. **创建 Worker** — 在 Cloudflare Dashboard 中创建 Worker，代码示例：
+2. **配置 Worker 环境变量和 KV**：
+   - `API_URL` — Python 服务地址，如 `https://etf-premium-alert.onrender.com`
+   - `ETF_CODES` — 逗号分隔 ETF 代码，如 `513500,159501`
+   - `API_SECRET` — 可选；如果 Python API 设置了 `ETF_API_SECRET`/`API_SECRET`，这里填同一个值。设置后，公网访问 Worker 的 `/record` 或手动触发入口也需要携带同样的 `X-API-Key` 或 Bearer Token
+   - `ETF_DATA` — Workers KV 绑定，用于保存 `positions` 和 `premium_<code>` 数据
+3. **创建 Worker** — `worker/src/index.js` 已包含定时触发、KV 恢复/备份和 `/record` 代理逻辑。简化示例：
 
 ```javascript
 export default {
@@ -153,8 +193,7 @@ export default {
 };
 ```
 
-3. **设置 Cron Trigger** — 在 Worker 的 Triggers 页面添加 Cron 表达式，例如每 15 分钟执行：`*/15 * * * *`
-4. **限制触发时间** — 可在 Worker 代码中判断当前是否为交易时段再触发
+4. **设置 Cron Trigger** — `worker/wrangler.toml` 默认配置为北京时间 9:00-15:00 每 15 分钟触发，并在 15:30 触发每日摘要
 
 ## 项目结构
 

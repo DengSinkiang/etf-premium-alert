@@ -6,6 +6,7 @@
  *
  * 环境变量（在 Cloudflare Dashboard 中设置）：
  * - API_URL: Python 服务的地址，如 https://etf-premium-alert.onrender.com
+ * - API_SECRET: Python API 共享密钥（可选；设置后会通过 X-API-Key 传递）
  * - ETF_CODES: 逗号分隔的 ETF 代码列表，如 "513500,513650,159501,159696,159612"
  *
  * KV 绑定：
@@ -40,7 +41,7 @@ export default {
     try {
       const response = await fetch(`${apiUrl}${endpoint}`, {
         method: "GET",
-        headers: { "User-Agent": "Cloudflare-Worker-ETF-Monitor" },
+        headers: buildApiHeaders(env),
       });
 
       const data = await response.json();
@@ -74,6 +75,13 @@ export default {
     const apiUrl = env.API_URL || "https://etf-premium-alert.onrender.com";
     const url = new URL(request.url);
 
+    if (!isAuthorizedRequest(request, env)) {
+      return new Response(JSON.stringify({ error: "unauthorized" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
     // Handle /record route
     if (url.pathname === "/record" && request.method === "POST") {
       try {
@@ -81,10 +89,7 @@ export default {
         const body = await request.text();
         const response = await fetch(`${apiUrl}/record`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "User-Agent": "Cloudflare-Worker-ETF-Monitor",
-          },
+          headers: buildApiHeaders(env, { "Content-Type": "application/json" }),
           body: body,
         });
 
@@ -116,7 +121,9 @@ export default {
 
     // Existing: proxy to /trigger (manual test) with backup
     try {
-      const response = await fetch(`${apiUrl}/trigger?force=true`);
+      const response = await fetch(`${apiUrl}/trigger?force=true`, {
+        headers: buildApiHeaders(env),
+      });
       const data = await response.json();
 
       // Backup to KV after successful trigger
@@ -141,6 +148,38 @@ export default {
  */
 function getETFCodes(env) {
   return (env.ETF_CODES || "").split(",").map((c) => c.trim()).filter(Boolean);
+}
+
+/**
+ * 构造调用 Python API 的请求头。
+ */
+function buildApiHeaders(env, extra = {}) {
+  const headers = {
+    "User-Agent": "Cloudflare-Worker-ETF-Monitor",
+    ...extra,
+  };
+
+  if (env.API_SECRET) {
+    headers["X-API-Key"] = env.API_SECRET;
+  }
+
+  return headers;
+}
+
+/**
+ * 校验公网访问 Worker 的请求。
+ */
+function isAuthorizedRequest(request, env) {
+  if (!env.API_SECRET) {
+    return true;
+  }
+
+  const apiKey = request.headers.get("X-API-Key");
+  if (apiKey === env.API_SECRET) {
+    return true;
+  }
+
+  return request.headers.get("Authorization") === `Bearer ${env.API_SECRET}`;
 }
 
 /**
@@ -190,10 +229,7 @@ async function restoreFromKV(env, apiUrl) {
     try {
       const response = await fetch(`${apiUrl}/data/restore`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "User-Agent": "Cloudflare-Worker-ETF-Monitor",
-        },
+        headers: buildApiHeaders(env, { "Content-Type": "application/json" }),
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
@@ -231,7 +267,7 @@ async function backupToKV(env, apiUrl) {
     try {
       response = await fetch(`${apiUrl}/data/backup`, {
         method: "GET",
-        headers: { "User-Agent": "Cloudflare-Worker-ETF-Monitor" },
+        headers: buildApiHeaders(env),
         signal: controller.signal,
       });
       clearTimeout(timeoutId);

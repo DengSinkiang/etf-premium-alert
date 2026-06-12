@@ -10,6 +10,12 @@ import pytest
 from src.api import app
 
 
+@pytest.fixture(autouse=True)
+def clear_api_secret(monkeypatch):
+    monkeypatch.delenv("ETF_API_SECRET", raising=False)
+    monkeypatch.delenv("API_SECRET", raising=False)
+
+
 @pytest.fixture
 def client():
     """Flask test client."""

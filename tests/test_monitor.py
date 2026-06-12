@@ -140,11 +140,13 @@ class TestMonitorRun:
         monitor = Monitor(config)
 
         mock_dsm = MagicMock()
-        # First ETF fails, second succeeds
-        mock_dsm.get_etf_data.side_effect = [
-            (None, "所有数据源获取 513500 均失败"),
-            (_make_etf_data(code="159501"), None),
-        ]
+        # 513500 fails, 159501 succeeds. Key by code because Monitor processes ETFs in parallel.
+        def get_etf_data(code):
+            if code == "513500":
+                return None, "所有数据源获取 513500 均失败"
+            return _make_etf_data(code="159501"), None
+
+        mock_dsm.get_etf_data.side_effect = get_etf_data
         monitor._data_source_manager = mock_dsm
 
         results = monitor.run()

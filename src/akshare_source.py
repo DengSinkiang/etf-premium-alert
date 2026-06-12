@@ -1,6 +1,7 @@
 """AKShare data source for ETF real-time data retrieval."""
 
 import logging
+import threading
 from datetime import datetime
 
 import akshare as ak
@@ -24,6 +25,7 @@ class AKShareSource:
 
     def __init__(self) -> None:
         self._df_cache: pd.DataFrame | None = None
+        self._cache_lock = threading.Lock()
 
     def fetch(self, code: str) -> ETFData:
         """获取指定 ETF 的实时数据。
@@ -40,22 +42,29 @@ class AKShareSource:
         Raises:
             DataFetchError: 网络超时、连接失败或数据解析错误时抛出
         """
-        # Populate cache if empty
+        # Populate cache if empty. The lock prevents concurrent monitor threads
+        # from issuing duplicate full-market AKShare requests.
         if self._df_cache is None:
-            try:
-                self._df_cache = ak.fund_etf_spot_em()
-            except TimeoutError as e:
-                logger.error(f"获取 {code} 数据超时: {e}")
-                raise DataFetchError(source="AKShare", code=code, reason=f"请求超时: {e}")
-            except ConnectionError as e:
-                logger.error(f"获取 {code} 数据连接失败: {e}")
-                raise DataFetchError(source="AKShare", code=code, reason=f"连接失败: {e}")
-            except Exception as e:
-                logger.error(f"获取 ETF 数据失败: {e}")
-                raise DataFetchError(source="AKShare", code=code, reason=str(e))
+            with self._cache_lock:
+                if self._df_cache is None:
+                    try:
+                        self._df_cache = ak.fund_etf_spot_em()
+                    except TimeoutError as e:
+                        logger.error(f"获取 {code} 数据超时: {e}")
+                        raise DataFetchError(source="AKShare", code=code, reason=f"请求超时: {e}")
+                    except ConnectionError as e:
+                        logger.error(f"获取 {code} 数据连接失败: {e}")
+                        raise DataFetchError(source="AKShare", code=code, reason=f"连接失败: {e}")
+                    except Exception as e:
+                        logger.error(f"获取 ETF 数据失败: {e}")
+                        raise DataFetchError(source="AKShare", code=code, reason=str(e))
 
         # Look up ETF code from cached DataFrame
         df = self._df_cache
+        if not isinstance(df, pd.DataFrame) or "代码" not in df.columns:
+            logger.error("AKShare 返回数据格式无效")
+            raise DataFetchError(source="AKShare", code=code, reason="返回数据格式无效")
+
         row = df[df["代码"] == code]
         if row.empty:
             logger.error(f"未找到 ETF 代码 {code} 的数据")
@@ -124,4 +133,5 @@ class AKShareSource:
 
     def invalidate_cache(self) -> None:
         """Clear the cached DataFrame, forcing next fetch to call the API."""
-        self._df_cache = None
+        with self._cache_lock:
+            self._df_cache = None

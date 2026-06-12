@@ -36,10 +36,10 @@ class TradingCalendar:
 
         if _HAS_CHINESE_CALENDAR:
             try:
-                return chinese_calendar.is_workday(date)
+                return date.weekday() < 5 and not chinese_calendar.is_holiday(date)
             except Exception as e:
                 logger.warning(
-                    "chinese_calendar.is_workday() 调用异常: %s，回退到基础逻辑", e
+                    "chinese_calendar.is_holiday() 调用异常: %s，回退到基础逻辑", e
                 )
                 return self._fallback_check(date)
         else:

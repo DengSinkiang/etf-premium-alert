@@ -1,6 +1,7 @@
 """Unit tests for AKShareSource."""
 
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -206,3 +207,40 @@ class TestAKShareSourceFetch:
         result = source.fetch("513500")
 
         assert result.source == "AKShare"
+
+    @patch("src.akshare_source.ak.fund_etf_spot_em")
+    def test_fetch_non_dataframe_raises_data_fetch_error(
+        self, mock_api: MagicMock, source: AKShareSource
+    ) -> None:
+        """Invalid AKShare response shape is wrapped in DataFetchError."""
+        mock_api.return_value = None
+
+        with pytest.raises(DataFetchError) as exc_info:
+            source.fetch("513500")
+
+        assert "返回数据格式无效" in exc_info.value.reason
+
+    @patch("src.akshare_source.ak.fund_etf_spot_em")
+    def test_fetch_missing_code_column_raises_data_fetch_error(
+        self, mock_api: MagicMock, source: AKShareSource
+    ) -> None:
+        """Missing ETF code column is wrapped in DataFetchError."""
+        mock_api.return_value = pd.DataFrame([{"最新价": 2.611, "IOPV实时估值": 2.58}])
+
+        with pytest.raises(DataFetchError) as exc_info:
+            source.fetch("513500")
+
+        assert "返回数据格式无效" in exc_info.value.reason
+
+    @patch("src.akshare_source.ak.fund_etf_spot_em")
+    def test_concurrent_fetch_populates_cache_once(
+        self, mock_api: MagicMock, source: AKShareSource
+    ) -> None:
+        """Concurrent first fetches should share one cached DataFrame."""
+        mock_api.return_value = _make_etf_dataframe()
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            results = list(executor.map(source.fetch, ["513500"] * 5))
+
+        assert [result.code for result in results] == ["513500"] * 5
+        mock_api.assert_called_once()

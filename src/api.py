@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import hmac
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,56 @@ from src.trading_calendar import TradingCalendar
 logger = logging.getLogger("monitor")
 
 app = Flask(__name__)
+
+
+def _get_api_secret() -> str | None:
+    """Return the configured shared API secret, if any."""
+    return os.environ.get("ETF_API_SECRET") or os.environ.get("API_SECRET")
+
+
+def _is_api_authorized() -> bool:
+    """Check shared-secret auth for operational HTTP endpoints.
+
+    If no secret is configured, endpoints remain open for local/dev use.
+    When ETF_API_SECRET or API_SECRET is set, callers must provide either
+    X-API-Key: <secret> or Authorization: Bearer <secret>.
+    """
+    secret = _get_api_secret()
+    if not secret:
+        return True
+
+    api_key = request.headers.get("X-API-Key")
+    if api_key and hmac.compare_digest(api_key, secret):
+        return True
+
+    auth_header = request.headers.get("Authorization", "")
+    return hmac.compare_digest(auth_header, f"Bearer {secret}")
+
+
+def _is_telegram_webhook_authorized() -> bool:
+    """Check Telegram webhook secret token when configured.
+
+    Telegram sends this value in X-Telegram-Bot-Api-Secret-Token when the
+    webhook is configured with a secret_token.
+    """
+    secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
+    if not secret:
+        return True
+
+    token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    return hmac.compare_digest(token, secret)
+
+
+def _unauthorized_response() -> tuple[Any, int]:
+    return jsonify({"status": "error", "message": "未授权"}), 401
+
+
+def _is_allowed_telegram_chat(chat_id: int | str, config: Any) -> bool:
+    """Allow Telegram commands only from the configured chat_id."""
+    allowed_chat_id = getattr(config.telegram, "chat_id", None)
+    if allowed_chat_id is None:
+        return False
+    return str(chat_id) == str(allowed_chat_id)
 
 
 def _serialize_result(result: MonitorResult) -> dict[str, Any]:
@@ -83,6 +134,9 @@ def trigger() -> tuple[Any, int]:
     Returns:
         Tuple of (JSON response, HTTP status code).
     """
+    if not _is_api_authorized():
+        return _unauthorized_response()
+
     force = request.args.get("force", "").lower() == "true"
     if not force:
         try:
@@ -117,6 +171,9 @@ def summary() -> tuple[Any, int]:
     Returns:
         Tuple of (JSON response, HTTP status code).
     """
+    if not _is_api_authorized():
+        return _unauthorized_response()
+
     try:
         config = load_config()
 
@@ -161,6 +218,9 @@ def data_backup() -> tuple[Any, int]:
     Returns HTTP 200 with the backup payload. Files that cannot be read
     are represented as null.
     """
+    if not _is_api_authorized():
+        return _unauthorized_response()
+
     try:
         config = load_config()
     except SystemExit:
@@ -205,6 +265,9 @@ def data_restore() -> tuple[Any, int]:
     Returns 200 {"status": "success"} on completion.
     Returns 400 if the request body is not valid JSON.
     """
+    if not _is_api_authorized():
+        return _unauthorized_response()
+
     data = request.get_json(force=True, silent=True)
     if data is None or not isinstance(data, dict):
         return jsonify({"status": "error", "message": "请求体必须为有效JSON"}), 400
@@ -213,6 +276,16 @@ def data_restore() -> tuple[Any, int]:
         config = load_config()
     except SystemExit:
         return jsonify({"status": "error", "message": "配置加载失败"}), 500
+
+    valid_codes = {etf.code for etf in config.etfs}
+    for key, value in data.items():
+        if key.startswith("premium_") and value is not None:
+            code = key[len("premium_"):]
+            if code not in valid_codes:
+                return jsonify({
+                    "status": "error",
+                    "message": f"无效的溢价率数据键: {key}",
+                }), 400
 
     data_dir = Path(config.data_dir)
     os.makedirs(data_dir, exist_ok=True)
@@ -292,6 +365,9 @@ def record_transaction() -> tuple[Any, int]:
         400 on validation errors.
         500 on store write failure.
     """
+    if not _is_api_authorized():
+        return _unauthorized_response()
+
     data = request.get_json(force=True, silent=True)
     if not data or not isinstance(data, dict):
         return jsonify({"status": "error", "message": "请求体必须为有效JSON"}), 400
@@ -336,6 +412,10 @@ def telegram_webhook() -> tuple[Any, int]:
     Returns:
         200 always (Telegram expects 200 to acknowledge receipt).
     """
+    if not _is_telegram_webhook_authorized():
+        logger.warning("忽略未授权 Telegram webhook 请求")
+        return jsonify({"ok": True}), 200
+
     update = request.get_json(force=True, silent=True)
     if not update or not isinstance(update, dict):
         return jsonify({"ok": True}), 200
@@ -353,6 +433,22 @@ def telegram_webhook() -> tuple[Any, int]:
 
     text = text.strip()
 
+    history_match = re.match(r"^/history\s+(\S+)$", text)
+    record_match = re.match(r"^/(buy|sell)\s+(\S+)\s+(\S+)$", text)
+    is_simple_command = text in ("/help", "/undo", "/status")
+    if not is_simple_command and history_match is None and record_match is None:
+        return jsonify({"ok": True}), 200
+
+    try:
+        config = load_config()
+    except SystemExit:
+        _send_telegram_reply(chat_id, "❌ 配置加载失败")
+        return jsonify({"ok": True}), 200
+
+    if not _is_allowed_telegram_chat(chat_id, config):
+        logger.warning("忽略未授权 Telegram chat: %s", chat_id)
+        return jsonify({"ok": True}), 200
+
     # Handle /help command
     if text == "/help":
         return _handle_help(chat_id)
@@ -362,7 +458,6 @@ def telegram_webhook() -> tuple[Any, int]:
         return _handle_undo(chat_id)
 
     # Handle /history CODE command
-    history_match = re.match(r"^/history\s+(\S+)$", text)
     if history_match:
         return _handle_history(chat_id, history_match.group(1))
 
@@ -371,27 +466,15 @@ def telegram_webhook() -> tuple[Any, int]:
         return _handle_status(chat_id)
 
     # Match /buy CODE AMOUNT or /sell CODE AMOUNT
-    pattern = r"^/(buy|sell)\s+(\S+)\s+(\S+)$"
-    match = re.match(pattern, text)
-    if not match:
-        return jsonify({"ok": True}), 200
-
-    txn_type = match.group(1)
-    code = match.group(2)
-    amount_str = match.group(3)
+    txn_type = record_match.group(1)
+    code = record_match.group(2)
+    amount_str = record_match.group(3)
 
     # Parse amount
     try:
         amount_val = float(amount_str)
     except (TypeError, ValueError):
         _send_telegram_reply(chat_id, "❌ 金额必须为正数且不超过10000000")
-        return jsonify({"ok": True}), 200
-
-    # Load config for validation
-    try:
-        config = load_config()
-    except SystemExit:
-        _send_telegram_reply(chat_id, "❌ 配置加载失败")
         return jsonify({"ok": True}), 200
 
     valid_codes = {etf.code for etf in config.etfs}
